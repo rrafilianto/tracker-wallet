@@ -22,8 +22,14 @@ function chainLabel(chain) {
   return (chain || 'sol').toUpperCase();
 }
 
-function formatTx(activity, address, chain) {
-  const lines = [`🔔 <b>[${chainLabel(chain)}] ${shortAddr(address)}</b>`];
+function displayName(wallet) {
+  if (wallet.label) return wallet.label;
+  return shortAddr(wallet.address);
+}
+
+function formatTx(activity, wallet) {
+  const name = wallet.label || shortAddr(wallet.address);
+  const lines = [`🔔 <b>[${chainLabel(wallet.chain)}] ${name}</b>`];
 
   if (!activity?.length) {
     lines.push('No recent transactions.');
@@ -61,6 +67,11 @@ function formatTx(activity, address, chain) {
 function formatStats(stats, address, chain) {
   if (!stats) return 'No stats available.';
   const lines = [`📊 <b>[${chainLabel(chain)}] ${shortAddr(address)}</b>`];
+  if (stats.native_balance !== undefined) {
+    const bal = Number(stats.native_balance);
+    const symbol = chain === 'sol' ? 'SOL' : 'ETH';
+    lines.push(`Balance: <b>${bal.toFixed(4)} ${symbol}</b>`);
+  }
   if (stats.realized_profit !== undefined)
     lines.push(`PnL: <b>${stats.realized_profit >= 0 ? '+' : ''}$${Number(stats.realized_profit).toLocaleString()}</b>`);
   const winrate = stats.pnl_stat?.winrate;
@@ -102,4 +113,5 @@ module.exports = {
   formatStats,
   formatHoldings,
   shortAddr,
+  displayName,
 };

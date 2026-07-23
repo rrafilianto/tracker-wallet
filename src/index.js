@@ -36,7 +36,7 @@ async function pollWallet(w) {
     const prev = lastTxMap[w.address];
     if (prev === undefined) {
       lastTxMap[w.address] = latestTxHash;
-      await tg.sendMessage(tg.formatTx(list, w.address, w.chain));
+      await tg.sendMessage(tg.formatTx(list, w));
       return;
     }
 
@@ -48,7 +48,7 @@ async function pollWallet(w) {
       }
       lastTxMap[w.address] = latestTxHash;
       if (newTxs.length > 0) {
-        await tg.sendMessage(tg.formatTx(newTxs.reverse(), w.address, w.chain));
+        await tg.sendMessage(tg.formatTx(newTxs.reverse(), w));
       }
     }
   } catch (err) {
@@ -87,8 +87,9 @@ async function handleCommand(msg) {
         '<b>Wallet Tracker Bot</b>\n\n' +
         '/track &lt;address&gt; [chain] — Start tracking\n' +
         '/untrack &lt;address&gt; — Stop tracking\n' +
+        '/tag &lt;address&gt; &lt;label&gt; — Set wallet nickname\n' +
         '/list — List tracked wallets\n' +
-        '/stats &lt;address&gt; [chain] — Get wallet stats\n' +
+        '/stats &lt;address&gt; [chain] — Get wallet stats & balance\n' +
         '/chains — Show available chains'
       );
       break;
@@ -130,14 +131,32 @@ async function handleCommand(msg) {
       await send(cid, `❌ Stopped <code>${tg.shortAddr(addr)}</code>`);
       break;
     }
+    case '/tag': {
+      const addr = parts[1];
+      const label = parts.slice(2).join(' ');
+      if (!addr || !label) {
+        await send(cid, 'Usage: /tag &lt;address&gt; &lt;label&gt;');
+        return;
+      }
+      const wallet = findWallet(addr);
+      if (!wallet) {
+        await send(cid, 'Wallet not tracked. Use /track first.');
+        return;
+      }
+      wallet.label = label;
+      config.saveWallets(wallets);
+      await send(cid, `🏷️ <b>${label}</b> → <code>${tg.shortAddr(addr)}</code>`);
+      break;
+    }
     case '/list': {
       if (!wallets.length) {
         await send(cid, 'No wallets tracked. Use /track &lt;address&gt; [chain]');
         return;
       }
-      const lines = wallets.map((w, i) =>
-        `${i + 1}. [${w.chain.toUpperCase()}] <code>${w.address}</code>`
-      );
+      const lines = wallets.map((w, i) => {
+        const name = w.label || '—';
+        return `${i + 1}. [${w.chain.toUpperCase()}] <code>${w.address}</code>\n   🏷️ ${name}`;
+      });
       await send(cid, `📋 <b>Tracked (${wallets.length})</b>\n${lines.join('\n')}`);
       break;
     }
@@ -165,6 +184,7 @@ async function handleCommand(msg) {
 bot.setMyCommands([
   { command: 'track', description: 'Track wallet: /track <addr> [chain]' },
   { command: 'untrack', description: 'Stop tracking: /untrack <addr>' },
+  { command: 'tag', description: 'Set label: /tag <addr> <name>' },
   { command: 'list', description: 'Show tracked wallets' },
   { command: 'stats', description: 'Wallet stats: /stats <addr> [chain]' },
   { command: 'chains', description: 'Show available chains' },
