@@ -16,6 +16,10 @@ let lastTxMap = {};
 
 const bot = tg.init(config.TELEGRAM_BOT_TOKEN, config.TELEGRAM_CHAT_ID);
 
+function send(chatId, text) {
+  return bot.sendMessage(chatId, text, { parse_mode: 'HTML' });
+}
+
 function findWallet(addr) {
   return wallets.find((w) => w.address === addr);
 }
@@ -79,7 +83,7 @@ async function handleCommand(msg) {
   switch (cmd) {
     case '/start':
     case '/help': {
-      await bot.sendMessage(cid,
+      await send(cid,
         '<b>Wallet Tracker Bot</b>\n\n' +
         '/track &lt;address&gt; [chain] — Start tracking\n' +
         '/untrack &lt;address&gt; — Stop tracking\n' +
@@ -91,56 +95,56 @@ async function handleCommand(msg) {
     }
     case '/chains': {
       const list = gmgn.VALID_CHAINS.map((c) => `• <code>${c}</code>`).join('\n');
-      await bot.sendMessage(cid, `<b>Supported Chains</b>\n${list}\n\nUsage: /track &lt;addr&gt; <code>&lt;chain&gt;</code>`);
+      await send(cid, `<b>Supported Chains</b>\n${list}\n\nUsage: /track &lt;addr&gt; <code>&lt;chain&gt;</code>`);
       break;
     }
     case '/track': {
       const addr = parts[1];
       const chain = (parts[2] || '').toLowerCase();
       if (!addr || addr.length < 10) {
-        await bot.sendMessage(cid, 'Usage: /track <wallet_address> [chain]');
+        await send(cid, 'Usage: /track &lt;wallet_address&gt; [chain]');
         return;
       }
       if (chain && !gmgn.VALID_CHAINS.includes(chain)) {
-        await bot.sendMessage(cid, `Invalid chain. Options: ${gmgn.VALID_CHAINS.join(', ')}`);
+        await send(cid, `Invalid chain. Options: ${gmgn.VALID_CHAINS.join(', ')}`);
         return;
       }
       if (findWallet(addr)) {
-        await bot.sendMessage(cid, 'Already tracking this wallet.');
+        await send(cid, 'Already tracking this wallet.');
         return;
       }
       const resolvedChain = chain || gmgn.detectChain(addr);
       wallets.push({ address: addr, chain: resolvedChain });
       config.saveWallets(wallets);
       lastTxMap[addr] = undefined;
-      await bot.sendMessage(cid, `✅ [${resolvedChain.toUpperCase()}] Tracking <code>${tg.shortAddr(addr)}</code>`);
+      await send(cid, `✅ [${resolvedChain.toUpperCase()}] Tracking <code>${tg.shortAddr(addr)}</code>`);
       await pollWallet({ address: addr, chain: resolvedChain });
       break;
     }
     case '/untrack': {
       const addr = parts[1];
-      if (!addr) { await bot.sendMessage(cid, 'Usage: /untrack <wallet_address>'); return; }
+      if (!addr) { await send(cid, 'Usage: /untrack &lt;wallet_address&gt;'); return; }
       wallets = wallets.filter((w) => w.address !== addr);
       config.saveWallets(wallets);
       delete lastTxMap[addr];
-      await bot.sendMessage(cid, `❌ Stopped <code>${tg.shortAddr(addr)}</code>`);
+      await send(cid, `❌ Stopped <code>${tg.shortAddr(addr)}</code>`);
       break;
     }
     case '/list': {
       if (!wallets.length) {
-        await bot.sendMessage(cid, 'No wallets tracked. Use /track <address> [chain]');
+        await send(cid, 'No wallets tracked. Use /track &lt;address&gt; [chain]');
         return;
       }
       const lines = wallets.map((w, i) =>
         `${i + 1}. [${w.chain.toUpperCase()}] <code>${w.address}</code>`
       );
-      await bot.sendMessage(cid, `📋 <b>Tracked (${wallets.length})</b>\n${lines.join('\n')}`);
+      await send(cid, `📋 <b>Tracked (${wallets.length})</b>\n${lines.join('\n')}`);
       break;
     }
     case '/stats': {
       const addr = parts[1];
       const chain = (parts[2] || '').toLowerCase();
-      if (!addr) { await bot.sendMessage(cid, 'Usage: /stats <wallet_address> [chain]'); return; }
+      if (!addr) { await send(cid, 'Usage: /stats &lt;wallet_address&gt; [chain]'); return; }
       const resolvedChain = chain || gmgn.detectChain(addr);
       try {
         const [stats, holdings] = await Promise.all([
@@ -149,9 +153,9 @@ async function handleCommand(msg) {
         ]);
         let response = tg.formatStats(stats, addr, resolvedChain);
         if (holdings) response += '\n\n' + tg.formatHoldings(holdings);
-        await bot.sendMessage(cid, response);
+        await send(cid, response);
       } catch (err) {
-        await bot.sendMessage(cid, `Error: ${err.message}`);
+        await send(cid, `Error: ${err.message}`);
       }
       break;
     }

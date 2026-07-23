@@ -30,10 +30,20 @@ function formatTx(activity, address, chain) {
     return lines.join('\n');
   }
 
+  const typeLabels = {
+    buy: '🟢 BUY',
+    sell: '🔴 SELL',
+    add: '📥 ADD LIQ',
+    remove: '📤 REMOVE LIQ',
+    transfer: '🔄 TRANSFER',
+    transferin: '⬇️ TRANSFER IN',
+    transferout: '⬆️ TRANSFER OUT',
+  };
+
   const recent = activity.slice(0, 5);
   recent.forEach((tx, i) => {
     const symbol = tx.token?.symbol || tx.token_symbol || 'Unknown';
-    const type = tx.event_type === 'buy' ? '🟢 BUY' : tx.event_type === 'sell' ? '🔴 SELL' : '🔄';
+    const type = typeLabels[tx.event_type?.toLowerCase()] || `🔄 ${(tx.event_type || '').toUpperCase()}`;
     const shortHash = tx.tx_hash ? ` <code>${tx.tx_hash.slice(0, 6)}</code>` : '';
     const usd = tx.cost_usd ? `$${Number(tx.cost_usd).toLocaleString()}` : '';
     const amount = tx.token_amount ? `${Number(tx.token_amount).toFixed(4)}` : '';
