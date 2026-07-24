@@ -116,7 +116,7 @@ function calculatePositionUsd(amount0, amount1, token0Addr, token1Addr, sqrtPric
   }
 }
 
-async function fetchMintDeposit(mintTxHash, walletAddr, token0Addr, token1Addr, dec0 = 18, dec1 = 18, sqrtPriceX96 = 0n) {
+async function fetchMintDeposit(mintTxHash, walletAddr, token0Addr, token1Addr, dec0 = 18, dec1 = 18, sqrtPriceX96 = 0n, sym0 = '', sym1 = '') {
   if (!mintTxHash || !walletAddr) return { depAmount0: 0, depAmount1: 0, depTotalUsd: 0 };
   try {
     const res = await fetch(`https://robinhoodchain.blockscout.com/api/v2/transactions/${mintTxHash}`);
@@ -131,6 +131,7 @@ async function fetchMintDeposit(mintTxHash, walletAddr, token0Addr, token1Addr, 
       const fromAddr = t.from?.hash?.toLowerCase();
       if (fromAddr === walletLower) {
         const tAddr = t.token?.address_hash?.toLowerCase();
+        const tSym = (t.token?.symbol || '').toUpperCase();
         const rawVal = BigInt(t.total?.value || '0');
         const decimals = Number(t.token?.decimals || 18);
         const val = Number(rawVal) / Math.pow(10, decimals);
@@ -139,15 +140,28 @@ async function fetchMintDeposit(mintTxHash, walletAddr, token0Addr, token1Addr, 
           depAmount0 += val;
         } else if (token1Addr && tAddr === token1Addr.toLowerCase()) {
           depAmount1 += val;
-        } else if (decimals === dec0) {
+        } else if (sym0 && tSym === sym0.toUpperCase()) {
           depAmount0 += val;
-        } else if (decimals === dec1) {
+        } else if (sym1 && tSym === sym1.toUpperCase()) {
+          depAmount1 += val;
+        } else if (decimals === dec0 && depAmount0 === 0) {
+          depAmount0 += val;
+        } else if (decimals === dec1 && depAmount1 === 0) {
           depAmount1 += val;
         }
       }
     });
 
-    const { totalUsd: depTotalUsd } = calculatePositionUsd(depAmount0, depAmount1, token0Addr, token1Addr, sqrtPriceX96, dec0, dec1);
+    const t0Addr = token0Addr || (sym0 === 'USDG' ? USDG_ADDRESS : null);
+    const t1Addr = token1Addr || (sym1 === 'USDG' ? USDG_ADDRESS : null);
+
+    let { totalUsd: depTotalUsd } = calculatePositionUsd(depAmount0, depAmount1, t0Addr, t1Addr, sqrtPriceX96, dec0, dec1);
+
+    if (depTotalUsd === 0) {
+      if (sym0 === 'USDG' || dec0 === 6) depTotalUsd += depAmount0;
+      if (sym1 === 'USDG' || dec1 === 6) depTotalUsd += depAmount1;
+    }
+
     return { depAmount0, depAmount1, depTotalUsd };
   } catch {
     return { depAmount0: 0, depAmount1: 0, depTotalUsd: 0 };
@@ -422,9 +436,13 @@ async function getExecutorPositions() {
             const dec1 = sym1 === 'USDG' ? 6 : 18;
 
             if (pMin > 0 && pMax > 0) {
-              const tLower = Math.floor(Math.log(pMin) / Math.log(1.0001));
-              const tUpper = Math.floor(Math.log(pMax) / Math.log(1.0001));
+              const pMinRaw = pMin * Math.pow(10, dec1 - dec0);
+              const pMaxRaw = pMax * Math.pow(10, dec1 - dec0);
+
+              const tLower = Math.floor(Math.log(pMinRaw) / Math.log(1.0001));
+              const tUpper = Math.floor(Math.log(pMaxRaw) / Math.log(1.0001));
               const tCurr = Math.floor((tLower + tUpper) / 2);
+
               const resLiq = getAmountsForLiquidity(liq.toString(), tCurr, tLower, tUpper, dec0, dec1);
               amount0 = resLiq.amount0;
               amount1 = resLiq.amount1;
@@ -441,7 +459,7 @@ async function getExecutorPositions() {
 
             // Initial deposit calculation for V4
             const mintTxHash = nftMintTxMap[tid];
-            const { depAmount0, depAmount1, depTotalUsd } = await fetchMintDeposit(mintTxHash, wallet.address, null, null, dec0, dec1, 0n);
+            const { depAmount0, depAmount1, depTotalUsd } = await fetchMintDeposit(mintTxHash, wallet.address, null, null, dec0, dec1, 0n, sym0, sym1);
 
             const unclaimed0 = 0;
             const unclaimed1 = 0;
@@ -453,13 +471,15 @@ async function getExecutorPositions() {
               const ageMs = Date.now() - new Date(mintTsStr).getTime();
               ageHours = Math.max(0.5, ageMs / (1000 * 3600));
             }
-            const est24hUsd = (unclaimedUsd / ageHours) * 24;
-            const baseForYield = depTotalUsd > 0 ? depTotalUsd : (totalUsd > 0 ? totalUsd : 0);
-            const est24hPercent = baseForYield > 0 ? (est24hUsd / baseForYield) * 100 : 0;
 
             const totalPosUsd = totalUsd + unclaimedUsd;
             const pnlUsd = depTotalUsd > 0 ? totalPosUsd - depTotalUsd : 0;
             const pnlPercent = depTotalUsd > 0 ? (pnlUsd / depTotalUsd) * 100 : 0;
+
+            const estEarnUsd = unclaimedUsd > 0 ? unclaimedUsd : Math.max(0, pnlUsd);
+            const est24hUsd = (estEarnUsd / ageHours) * 24;
+            const baseForYield = depTotalUsd > 0 ? depTotalUsd : (totalUsd > 0 ? totalUsd : 0);
+            const est24hPercent = baseForYield > 0 ? (est24hUsd / baseForYield) * 100 : 0;
 
             const ageStr = formatAgeFromTimestamp(nftMintTsMap[tid]);
 
