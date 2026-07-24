@@ -10,40 +10,138 @@ const ERC20_ABI = [
   'function allowance(address owner, address spender) view returns (uint256)'
 ];
 
-const UNISWAP_V3_NFPM_ABI = [
-  'function balanceOf(address owner) view returns (uint256)',
-  'function tokenOfOwnerByIndex(address owner, uint256 index) view returns (uint256)',
-  'function positions(uint256 tokenId) view returns (uint96 nonce, address operator, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128, uint128 tokensOwed0, uint128 tokensOwed1)',
-  'function mint(tuple(address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint256 amount0Desired, uint256 amount1Desired, uint256 amount0Min, uint256 amount1Min, address recipient, uint256 deadline)) payable returns (uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)',
-  'function decreaseLiquidity(tuple(uint256 tokenId, uint128 liquidity, uint256 amount0Min, uint256 amount1Min, uint256 deadline)) returns (uint256 amount0, uint256 amount1)',
-  'function collect(tuple(uint256 tokenId, address recipient, uint128 amount0Max, uint128 amount1Max)) returns (uint256 amount0, uint256 amount1)'
-];
-
-const UNISWAP_V4_POSM_ABI = [
-  'function balanceOf(address owner) view returns (uint256)',
-  'function ownerOf(uint256 tokenId) view returns (address)',
-  'function tokenURI(uint256 tokenId) view returns (string)',
-  'function getPositionLiquidity(uint256 tokenId) view returns (uint128)',
-  'function modifyLiquidities(bytes commands, bytes[] inputs, uint256 deadline) payable'
-];
-
-const UNISWAP_V3_SWAP_ROUTER_ABI = [
-  'function exactInputSingle(tuple(address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 deadline, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96)) payable returns (uint256 amountOut)'
-];
-
-const UNISWAP_V3_FACTORY_ABI = [
-  'function getPool(address token0, address token1, uint24 fee) view returns (address)'
-];
-
-const UNISWAP_V3_POOL_ABI = [
-  'function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)'
-];
-
 // Addresses on Robinhood Chain
-const UNISWAP_V3_NFPM_ADDRESS = process.env.UNISWAP_V3_NFPM_ADDRESS || '0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3';
 const UNISWAP_V4_POSM_ADDRESS = process.env.UNISWAP_V4_POSM_ADDRESS || '0x58daec3116aae6D93017bAAea7749052E8a04fA7';
-const UNISWAP_V3_ROUTER_ADDRESS = process.env.UNISWAP_V3_ROUTER_ADDRESS || '0xE592427A0AEce92De3Edee1F18E0157C05861564';
+const UNISWAP_V4_STATEVIEW_ADDRESS = process.env.UNISWAP_V4_STATEVIEW_ADDRESS || '0xF3334192D15450CdD385c8B70e03f9A6bD9E673b';
 const USDG_ADDRESS = process.env.USDG_ADDRESS || '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168';
+
+const signed24 = (v) => (v >= 0x800000 ? v - 0x1000000 : v);
+const MASK256 = (1n << 256n) - 1n;
+
+async function getV4PositionDetails(tokenId, walletAddress) {
+  const provider = getProvider();
+  const posm = new ethers.Contract(UNISWAP_V4_POSM_ADDRESS, UNISWAP_V4_POSM_ABI, provider);
+  const sv = new ethers.Contract(UNISWAP_V4_STATEVIEW_ADDRESS, STATEVIEW_ABI, provider);
+  const coder = ethers.AbiCoder.defaultAbiCoder();
+
+  const [owner, liq] = await Promise.all([
+    posm.ownerOf(tokenId).catch(() => ethers.ZeroAddress),
+    posm.getPositionLiquidity(tokenId).catch(() => 0n)
+  ]);
+
+  if (owner.toLowerCase() !== walletAddress.toLowerCase() || liq === 0n) return null;
+
+  const [pk, infoRaw] = await posm.getPoolAndPositionInfo(tokenId);
+  const info = BigInt(infoRaw);
+  const tickLower = signed24(Number((info >> 8n) & 0xffffffn));
+  const tickUpper = signed24(Number((info >> 32n) & 0xffffffn));
+  const fee = Number(pk.fee);
+  const tickSpacing = Number(pk.tickSpacing);
+  const c0 = pk.currency0;
+  const c1 = pk.currency1;
+
+  let dec0 = 18, sym0 = 'TOKEN0';
+  let dec1 = 18, sym1 = 'TOKEN1';
+
+  if (c0.toLowerCase() === USDG_ADDRESS.toLowerCase()) { dec0 = 6; sym0 = 'USDG'; }
+  else {
+    try {
+      const c = new ethers.Contract(c0, ERC20_ABI, provider);
+      const [d, s] = await Promise.all([c.decimals(), c.symbol()]);
+      dec0 = Number(d); sym0 = s;
+    } catch {}
+  }
+
+  if (c1.toLowerCase() === USDG_ADDRESS.toLowerCase()) { dec1 = 6; sym1 = 'USDG'; }
+  else {
+    try {
+      const c = new ethers.Contract(c1, ERC20_ABI, provider);
+      const [d, s] = await Promise.all([c.decimals(), c.symbol()]);
+      dec1 = Number(d); sym1 = s;
+    } catch {}
+  }
+
+  const poolId = ethers.keccak256(coder.encode(
+    ['address', 'address', 'uint24', 'int24', 'address'],
+    [c0, c1, fee, tickSpacing, pk.hooks]
+  ));
+
+  const positionId = ethers.solidityPackedKeccak256(
+    ['address', 'int24', 'int24', 'bytes32'],
+    [UNISWAP_V4_POSM_ADDRESS, tickLower, tickUpper, ethers.toBeHex(BigInt(tokenId), 32)]
+  );
+
+  const [s0, fgInside, posInfo] = await Promise.all([
+    sv.getSlot0(poolId),
+    sv.getFeeGrowthInside(poolId, tickLower, tickUpper).catch(() => [0n, 0n]),
+    sv.getPositionInfo(poolId, positionId).catch(() => [0n, 0n, 0n])
+  ]);
+
+  const tick = Number(s0.tick);
+  const CHAIN_ID = 4663;
+  const cur0 = c0.toLowerCase() === ethers.ZeroAddress ? Ether.onChain(CHAIN_ID) : new Token(CHAIN_ID, ethers.getAddress(c0), dec0, sym0);
+  const cur1 = c1.toLowerCase() === ethers.ZeroAddress ? Ether.onChain(CHAIN_ID) : new Token(CHAIN_ID, ethers.getAddress(c1), dec1, sym1);
+
+  const pool = new Pool(cur0, cur1, fee, tickSpacing, pk.hooks, s0.sqrtPriceX96.toString(), '0', tick);
+  const pos = new Position({ pool, liquidity: liq.toString(), tickLower, tickUpper });
+
+  const fee0raw = (((BigInt(fgInside[0]) - BigInt(posInfo[1])) & MASK256) * BigInt(liq)) >> 128n;
+  const fee1raw = (((BigInt(fgInside[1]) - BigInt(posInfo[2])) & MASK256) * BigInt(liq)) >> 128n;
+
+  const fee0 = CurrencyAmount.fromRawAmount(cur0, fee0raw.toString());
+  const fee1 = CurrencyAmount.fromRawAmount(cur1, fee1raw.toString());
+
+  const total0 = pos.amount0.add(fee0);
+  const total1 = pos.amount1.add(fee1);
+
+  const isC0Usd = c0.toLowerCase() === USDG_ADDRESS.toLowerCase();
+  const isC1Usd = c1.toLowerCase() === USDG_ADDRESS.toLowerCase();
+
+  let valueUsd = 0;
+  let feeUsd = 0;
+
+  if (isC0Usd) {
+    const val1In0 = Number(pool.priceOf(cur1).quote(total1).toExact());
+    valueUsd = Number(total0.toExact()) + val1In0;
+    const fee1In0 = Number(pool.priceOf(cur1).quote(fee1).toExact());
+    feeUsd = Number(fee0.toExact()) + fee1In0;
+  } else if (isC1Usd) {
+    const val0In1 = Number(pool.priceOf(cur0).quote(total0).toExact());
+    valueUsd = Number(total1.toExact()) + val0In1;
+    const fee0In1 = Number(pool.priceOf(cur0).quote(fee0).toExact());
+    feeUsd = Number(fee1.toExact()) + fee0In1;
+  }
+
+  let rangeStr = 'Concentrated';
+  try {
+    const uriData = await posm.tokenURI(tokenId);
+    if (uriData.startsWith('data:application/json;base64,')) {
+      const jsonStr = Buffer.from(uriData.replace('data:application/json;base64,', ''), 'base64').toString('utf-8');
+      const meta = JSON.parse(jsonStr);
+      const name = meta.name || '';
+      const parts = name.split(' - ');
+      if (parts.length >= 4) {
+        rangeStr = `$${parts[3].replace('<>', ' - $')}`;
+      }
+    }
+  } catch {}
+
+  return {
+    tokenId,
+    sym0,
+    sym1,
+    dec0,
+    dec1,
+    amount0: Number(pos.amount0.toExact()),
+    amount1: Number(pos.amount1.toExact()),
+    unclaimed0: Number(fee0.toExact()),
+    unclaimed1: Number(fee1.toExact()),
+    valueUsd,
+    feeUsd,
+    feePct: fee / 10000,
+    rangeStr
+  };
+}
 
 function getAmountsForLiquidity(liquidityStr, tickCurrent, tickLower, tickUpper, dec0 = 18, dec1 = 18) {
   try {
@@ -173,7 +271,7 @@ function getRobinhoodRpcUrl() {
   if (process.env.ALCHEMY_API_KEY && process.env.ALCHEMY_API_KEY !== 'your_alchemy_api_key_here') {
     return `https://robinhood-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}`;
   }
-  return 'https://robinhood-mainnet.g.alchemy.com/v2/demo';
+  return 'https://rpc.mainnet.chain.robinhood.com';
 }
 
 function getProvider() {
@@ -182,7 +280,7 @@ function getProvider() {
 }
 
 function getWallet() {
-  const pk = process.env.EXECUTIVE_PRIVATE_KEY;
+  const pk = process.env.EXECUTIVE_PRIVATE_KEY || process.env.EXECUTIVE_PRIVATE_KEY || process.env.RH_WALLET_KEY;
   if (!pk || pk === '0x...' || pk.length < 32) {
     throw new Error('EXECUTIVE_PRIVATE_KEY not configured in .env');
   }
@@ -272,247 +370,64 @@ async function getExecutorPositions() {
     // Ignore age fetch error
   }
 
-  // 1. Check Uniswap V3 Positions (100% Pure Dynamic On-Chain Query)
-  try {
-    const v3Nfpm = new ethers.Contract(UNISWAP_V3_NFPM_ADDRESS, UNISWAP_V3_NFPM_ABI, provider);
-    const v3Bal = await v3Nfpm.balanceOf(wallet.address).catch(() => 0n);
-
-    for (let i = 0; i < Number(v3Bal); i++) {
-      try {
-        const tid = await v3Nfpm.tokenOfOwnerByIndex(wallet.address, i);
-        const pos = await v3Nfpm.positions(tid);
-        if (pos.liquidity === 0n) continue;
-
-        const token0Contract = new ethers.Contract(pos.token0, ERC20_ABI, provider);
-        const token1Contract = new ethers.Contract(pos.token1, ERC20_ABI, provider);
-
-        const [sym0, sym1, dec0Raw, dec1Raw] = await Promise.all([
-          token0Contract.symbol().catch(() => 'TOKEN0'),
-          token1Contract.symbol().catch(() => 'TOKEN1'),
-          token0Contract.decimals().catch(() => 18n),
-          token1Contract.decimals().catch(() => 18n)
-        ]);
-
-        const dec0 = Number(dec0Raw);
-        const dec1 = Number(dec1Raw);
-
-        let currentTick = 0;
-        let sqrtPriceX96 = 0n;
-        try {
-          const factoryAddr = await v3Nfpm.factory().catch(() => '0x33128a8fC17869897dcE68Ed026d694621f6FDfD');
-          const factory = new ethers.Contract(factoryAddr, UNISWAP_V3_FACTORY_ABI, provider);
-          const poolAddress = await factory.getPool(pos.token0, pos.token1, pos.fee);
-          if (poolAddress && poolAddress !== ethers.ZeroAddress) {
-            const poolContract = new ethers.Contract(poolAddress, UNISWAP_V3_POOL_ABI, provider);
-            const slot0 = await poolContract.slot0();
-            sqrtPriceX96 = slot0.sqrtPriceX96;
-            currentTick = Number(slot0.tick);
-          } else {
-            currentTick = Math.floor((Number(pos.tickLower) + Number(pos.tickUpper)) / 2);
-          }
-        } catch {
-          currentTick = Math.floor((Number(pos.tickLower) + Number(pos.tickUpper)) / 2);
-        }
-
-        const { amount0, amount1 } = getAmountsForLiquidity(pos.liquidity, currentTick, pos.tickLower, pos.tickUpper, dec0, dec1);
-        const { totalUsd } = calculatePositionUsd(amount0, amount1, pos.token0, pos.token1, sqrtPriceX96, dec0, dec1);
-
-        // Unclaimed fees (tokensOwed0 & tokensOwed1)
-        let unclaimed0 = 0;
-        let unclaimed1 = 0;
-        let unclaimedUsd = 0;
-        if (pos.tokensOwed0 !== undefined && pos.tokensOwed1 !== undefined) {
-          unclaimed0 = Number(pos.tokensOwed0) / Math.pow(10, dec0);
-          unclaimed1 = Number(pos.tokensOwed1) / Math.pow(10, dec1);
-          const resFees = calculatePositionUsd(unclaimed0, unclaimed1, pos.token0, pos.token1, sqrtPriceX96, dec0, dec1);
-          unclaimedUsd = resFees.totalUsd;
-        }
-
-        // Initial deposit calculation
-        const mintTxHash = nftMintTxMap[tid.toString()];
-        const { depAmount0, depAmount1, depTotalUsd } = await fetchMintDeposit(mintTxHash, wallet.address, pos.token0, pos.token1, dec0, dec1, sqrtPriceX96);
-
-        // 24h fee earnings estimation
-        const mintTsStr = nftMintTsMap[tid.toString()];
-        let ageHours = 24;
-        if (mintTsStr) {
-          const ageMs = Date.now() - new Date(mintTsStr).getTime();
-          ageHours = Math.max(0.5, ageMs / (1000 * 3600));
-        }
-        const est24hUsd = (unclaimedUsd / ageHours) * 24;
-        const baseForYield = depTotalUsd > 0 ? depTotalUsd : (totalUsd > 0 ? totalUsd : 0);
-        const est24hPercent = baseForYield > 0 ? (est24hUsd / baseForYield) * 100 : 0;
-
-        const totalPosUsd = totalUsd + unclaimedUsd;
-        const pnlUsd = depTotalUsd > 0 ? totalPosUsd - depTotalUsd : 0;
-        const pnlPercent = depTotalUsd > 0 ? (pnlUsd / depTotalUsd) * 100 : 0;
-
-        positions.push({
-          tokenId: tid.toString(),
-          symbol0: sym0,
-          symbol1: sym1,
-          amount0,
-          amount1,
-          totalUsd,
-          depAmount0,
-          depAmount1,
-          depTotalUsd,
-          unclaimed0,
-          unclaimed1,
-          unclaimedUsd,
-          est24hUsd,
-          est24hPercent,
-          pnlUsd,
-          pnlPercent,
-          fee: Number(pos.fee) / 10000,
-          liquidity: pos.liquidity.toString(),
-          ageStr: formatAgeFromTimestamp(nftMintTsMap[tid.toString()]),
-          tickLower: pos.tickLower.toString(),
-          tickUpper: pos.tickUpper.toString(),
-          isV4: false
-        });
-      } catch {
-        // Skip
-      }
-    }
-  } catch {
-    // Skip V3 error
-  }
-
   // 2. Check Uniswap V4 Positions (UNI-V4-POSM - 100% Pure Dynamic On-Chain Query)
   try {
     const url = `https://robinhoodchain.blockscout.com/api/v2/addresses/${wallet.address}/nft`;
     const res = await fetch(url);
     const data = await res.json();
 
-    const v4Posm = new ethers.Contract(UNISWAP_V4_POSM_ADDRESS, UNISWAP_V4_POSM_ABI, provider);
-
     if (data.items) {
       for (const item of data.items) {
         const tid = (item.id || item.token_id).toString();
         try {
-          const owner = await v4Posm.ownerOf(tid);
-          if (owner.toLowerCase() === wallet.address.toLowerCase()) {
-            // Check position liquidity dynamically on-chain via getPositionLiquidity
-            const liq = await v4Posm.getPositionLiquidity(tid).catch(() => 0n);
-            if (liq === 0n) continue; // Skip closed positions (liquidity = 0)
+          const v4Detail = await getV4PositionDetails(tid, wallet.address);
+          if (!v4Detail) continue;
 
-            const uriData = await v4Posm.tokenURI(tid);
-            let sym0 = 'TOKEN0';
-            let sym1 = 'TOKEN1';
-            let fee = 0;
-            let range = 'Concentrated';
-            let pMin = 0;
-            let pMax = 0;
+          // Initial deposit calculation for V4
+          const mintTxHash = nftMintTxMap[tid];
+          const { depAmount0, depAmount1, depTotalUsd } = await fetchMintDeposit(mintTxHash, wallet.address, null, null, v4Detail.dec0, v4Detail.dec1, 0n, v4Detail.sym0, v4Detail.sym1);
 
-            if (uriData.startsWith('data:application/json;base64,')) {
-              const jsonStr = Buffer.from(uriData.replace('data:application/json;base64,', ''), 'base64').toString('utf-8');
-              const meta = JSON.parse(jsonStr);
-              const name = meta.name || '';
-
-              // Parse title format: "Uniswap - 2.45% - USDG/BRODIE - 0.00099551<>0.0019768"
-              const parts = name.split(' - ');
-              if (parts.length >= 4) {
-                fee = parseFloat(parts[1]);
-                const pairParts = parts[2].split('/');
-                if (pairParts.length === 2) {
-                  sym0 = pairParts[0];
-                  sym1 = pairParts[1];
-                }
-                const rangeParts = parts[3].split('<>');
-                if (rangeParts.length === 2) {
-                  pMin = parseFloat(rangeParts[0]);
-                  pMax = parseFloat(rangeParts[1]);
-                  range = `$${rangeParts[0]} - $${rangeParts[1]}`;
-                }
-              }
-            }
-
-            let amount0 = 0;
-            let amount1 = 0;
-            let totalUsd = 0;
-
-            const dec0 = sym0 === 'USDG' ? 6 : 18;
-            const dec1 = sym1 === 'USDG' ? 6 : 18;
-
-            if (pMin > 0 && pMax > 0) {
-              let pMinRaw, pMaxRaw;
-              if (sym0 === 'USDG') {
-                pMinRaw = (1 / pMax) * Math.pow(10, dec1 - dec0);
-                pMaxRaw = (1 / pMin) * Math.pow(10, dec1 - dec0);
-              } else {
-                pMinRaw = pMin * Math.pow(10, dec1 - dec0);
-                pMaxRaw = pMax * Math.pow(10, dec1 - dec0);
-              }
-
-              const tLower = Math.floor(Math.log(pMinRaw) / Math.log(1.0001));
-              const tUpper = Math.floor(Math.log(pMaxRaw) / Math.log(1.0001));
-              const tCurr = Math.floor((tLower + tUpper) / 2);
-
-              const resLiq = getAmountsForLiquidity(liq.toString(), tCurr, tLower, tUpper, dec0, dec1);
-              amount0 = resLiq.amount0;
-              amount1 = resLiq.amount1;
-              const pMid = Math.sqrt(pMin * pMax);
-
-              if (sym0 === 'USDG') {
-                totalUsd = amount0 + amount1 * pMid;
-              } else if (sym1 === 'USDG') {
-                totalUsd = amount0 * pMid + amount1;
-              } else {
-                totalUsd = amount0 + amount1;
-              }
-            }
-
-            // Initial deposit calculation for V4
-            const mintTxHash = nftMintTxMap[tid];
-            const { depAmount0, depAmount1, depTotalUsd } = await fetchMintDeposit(mintTxHash, wallet.address, null, null, dec0, dec1, 0n, sym0, sym1);
-
-            const unclaimed0 = 0;
-            const unclaimed1 = 0;
-            const unclaimedUsd = 0;
-
-            const mintTsStr = nftMintTsMap[tid];
-            let ageHours = 24;
-            if (mintTsStr) {
-              const ageMs = Date.now() - new Date(mintTsStr).getTime();
-              ageHours = Math.max(0.5, ageMs / (1000 * 3600));
-            }
-
-            const totalPosUsd = totalUsd + unclaimedUsd;
-            const pnlUsd = depTotalUsd > 0 ? totalPosUsd - depTotalUsd : 0;
-            const pnlPercent = depTotalUsd > 0 ? (pnlUsd / depTotalUsd) * 100 : 0;
-
-            const est24hUsd = unclaimedUsd > 0 ? (unclaimedUsd / ageHours) * 24 : 0;
-            const baseForYield = depTotalUsd > 0 ? depTotalUsd : (totalUsd > 0 ? totalUsd : 0);
-            const est24hPercent = baseForYield > 0 ? (est24hUsd / baseForYield) * 100 : 0;
-
-            const ageStr = formatAgeFromTimestamp(nftMintTsMap[tid]);
-
-            positions.push({
-              tokenId: tid,
-              symbol0: sym0,
-              symbol1: sym1,
-              amount0,
-              amount1,
-              totalUsd,
-              depAmount0,
-              depAmount1,
-              depTotalUsd,
-              unclaimed0,
-              unclaimed1,
-              unclaimedUsd,
-              est24hUsd,
-              est24hPercent,
-              pnlUsd,
-              pnlPercent,
-              fee: fee,
-              liquidity: liq.toString(),
-              ageStr: ageStr,
-              tickLower: range,
-              tickUpper: '',
-              isV4: true
-            });
+          const mintTsStr = nftMintTsMap[tid];
+          let ageHours = 24;
+          if (mintTsStr) {
+            const ageMs = Date.now() - new Date(mintTsStr).getTime();
+            ageHours = Math.max(0.5, ageMs / (1000 * 3600));
           }
+
+          const totalPosUsd = v4Detail.valueUsd;
+          const pnlUsd = depTotalUsd > 0 ? totalPosUsd - depTotalUsd : 0;
+          const pnlPercent = depTotalUsd > 0 ? (pnlUsd / depTotalUsd) * 100 : 0;
+
+          const est24hUsd = v4Detail.feeUsd > 0 ? (v4Detail.feeUsd / ageHours) * 24 : 0;
+          const baseForYield = depTotalUsd > 0 ? depTotalUsd : (v4Detail.valueUsd > 0 ? v4Detail.valueUsd : 0);
+          const est24hPercent = baseForYield > 0 ? (est24hUsd / baseForYield) * 100 : 0;
+
+          const ageStr = formatAgeFromTimestamp(nftMintTsMap[tid]);
+
+          positions.push({
+            tokenId: tid,
+            symbol0: v4Detail.sym0,
+            symbol1: v4Detail.sym1,
+            amount0: v4Detail.amount0,
+            amount1: v4Detail.amount1,
+            totalUsd: v4Detail.valueUsd - v4Detail.feeUsd,
+            depAmount0,
+            depAmount1,
+            depTotalUsd,
+            unclaimed0: v4Detail.unclaimed0,
+            unclaimed1: v4Detail.unclaimed1,
+            unclaimedUsd: v4Detail.feeUsd,
+            est24hUsd,
+            est24hPercent,
+            pnlUsd,
+            pnlPercent,
+            fee: v4Detail.feePct,
+            liquidity: 'Active',
+            ageStr,
+            tickLower: v4Detail.rangeStr,
+            tickUpper: '',
+            isV4: true
+          });
         } catch {
           // Skip if burned or non-owned
         }
@@ -540,7 +455,7 @@ async function executeCopyAddLiquidity(tx, amountUsd = 50) {
 
   const parsedAmountUsd = ethers.parseUnits(amountUsd.toString(), 6); // Default USDG has 6 decimals
 
-  // Check and approve allowance
+  // Check and approve allowance for V4 PositionManager
   const allow0 = await token0.allowance(wallet.address, UNISWAP_V4_POSM_ADDRESS).catch(() => 0n);
   if (allow0 < parsedAmountUsd) {
     const txApp0 = await token0.approve(UNISWAP_V4_POSM_ADDRESS, ethers.MaxUint256);
@@ -553,93 +468,48 @@ async function executeCopyAddLiquidity(tx, amountUsd = 50) {
     await txApp1.wait();
   }
 
-  const nfpm = new ethers.Contract(UNISWAP_V4_POSM_ADDRESS, UNISWAP_V3_NFPM_ABI, wallet);
+  const tickLower = tx.tick_lower ?? -887270;
+  const tickUpper = tx.tick_upper ?? 887270;
+  const fee = tx.fee ?? 3000;
+  const tickSpacing = tx.tick_spacing ?? 60;
+  const hooks = tx.hooks ?? ethers.ZeroAddress;
 
-  const mintParams = {
-    token0: token0Addr,
-    token1: token1Addr,
-    fee: 3000, // 0.3% fee tier
-    tickLower: tx.tick_lower ?? -887272,
-    tickUpper: tx.tick_upper ?? 887272,
-    amount0Desired: parsedAmountUsd,
-    amount1Desired: parsedAmountUsd,
-    amount0Min: 0n,
-    amount1Min: 0n,
-    recipient: wallet.address,
-    deadline: Math.floor(Date.now() / 1000) + 600
-  };
+  // Use V4PositionPlanner from @uniswap/v4-sdk
+  const planner = new v4sdk.V4PositionPlanner();
+  planner.addMint(
+    { currency0: token0Addr, currency1: token1Addr, fee, tickSpacing, hooks },
+    tickLower,
+    tickUpper,
+    parsedAmountUsd.toString(),
+    parsedAmountUsd.toString(),
+    parsedAmountUsd.toString(),
+    wallet.address,
+    '0x'
+  );
 
-  const txResponse = await nfpm.mint(mintParams);
+  const deadline = Math.floor(Date.now() / 1000) + 600;
+  const unlockData = planner.finalize();
+
+  const posm = new ethers.Contract(UNISWAP_V4_POSM_ADDRESS, UNISWAP_V4_POSM_ABI, wallet);
+  const txResponse = await posm.modifyLiquidities(unlockData, deadline);
   const receipt = await txResponse.wait();
   return receipt.hash;
 }
 
 async function closePositionAndSwapToUsdg(tokenId) {
   const wallet = getWallet();
-  const nfpm = new ethers.Contract(UNISWAP_V4_POSM_ADDRESS, UNISWAP_V3_NFPM_ABI, wallet);
-
-  // 1. Get position details
-  const pos = await nfpm.positions(tokenId).catch(() => null);
+  const posm = new ethers.Contract(UNISWAP_V4_POSM_ADDRESS, UNISWAP_V4_POSM_ABI, wallet);
 
   const deadline = Math.floor(Date.now() / 1000) + 600;
 
-  // 2. Decrease Liquidity (100%)
-  if (pos && pos.liquidity > 0n) {
-    const decreaseTx = await nfpm.decreaseLiquidity({
-      tokenId,
-      liquidity: pos.liquidity,
-      amount0Min: 0n,
-      amount1Min: 0n,
-      deadline
-    });
-    await decreaseTx.wait();
-  }
+  // Use V4PositionPlanner to burn & collect liquidity on V4
+  const planner = new v4sdk.V4PositionPlanner();
+  planner.addBurn(tokenId, 0, 0, '0x');
+  const unlockData = planner.finalize();
 
-  // 3. Collect tokens
-  const collectTx = await nfpm.collect({
-    tokenId,
-    recipient: wallet.address,
-    amount0Max: ethers.MaxUint128,
-    amount1Max: ethers.MaxUint128
-  });
-  const collectReceipt = await collectTx.wait();
-
-  // 4. Auto-Swap non-USDG tokens to USDG
-  if (pos) {
-    const swapRouter = new ethers.Contract(UNISWAP_V3_ROUTER_ADDRESS, UNISWAP_V3_SWAP_ROUTER_ABI, wallet);
-    const tokensToCheck = [pos.token0, pos.token1];
-
-    for (const tokenAddr of tokensToCheck) {
-      if (tokenAddr && tokenAddr.toLowerCase() !== USDG_ADDRESS.toLowerCase()) {
-        try {
-          const tokenContract = new ethers.Contract(tokenAddr, ERC20_ABI, wallet);
-          const bal = await tokenContract.balanceOf(wallet.address);
-          if (bal > 0n) {
-            // Approve router
-            const approveTx = await tokenContract.approve(UNISWAP_V3_ROUTER_ADDRESS, bal);
-            await approveTx.wait();
-
-            // Swap to USDG
-            const swapTx = await swapRouter.exactInputSingle({
-              tokenIn: tokenAddr,
-              tokenOut: USDG_ADDRESS,
-              fee: pos.fee,
-              recipient: wallet.address,
-              deadline,
-              amountIn: bal,
-              amountOutMinimum: 0n,
-              sqrtPriceLimitX96: 0n
-            });
-            await swapTx.wait();
-          }
-        } catch (e) {
-          console.error(`Error auto-swapping token ${tokenAddr} to USDG:`, e.message);
-        }
-      }
-    }
-  }
-
-  return collectReceipt.hash;
+  const txResponse = await posm.modifyLiquidities(unlockData, deadline);
+  const receipt = await txResponse.wait();
+  return receipt.hash;
 }
 
 module.exports = {

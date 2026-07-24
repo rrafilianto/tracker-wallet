@@ -271,7 +271,7 @@ function formatCompactNumber(val) {
 function formatExecutorPositions(positions) {
   if (!positions || positions.length === 0) {
     return {
-      text: '🏊 <b>Active Positions</b> (Uniswap V3 / V4)\nNo active liquidity positions found on Robinhood Chain.',
+      text: '🏊 <b>Active Positions</b> (Uniswap V4)\nNo active liquidity positions found on Robinhood Chain.',
       reply_markup: undefined,
     };
   }
@@ -286,7 +286,6 @@ function formatExecutorPositions(positions) {
 
   positions.forEach((pos, i) => {
     const pair = pos.symbol1 ? `${pos.symbol0}/${pos.symbol1}` : pos.symbol0;
-    const versionTag = pos.isV4 !== false ? 'V4' : 'V3';
     const rangeStr = pos.tickUpper ? `${pos.tickLower} <> ${pos.tickUpper}` : pos.tickLower;
     const ageStr = pos.ageStr || '-';
 
@@ -339,7 +338,7 @@ function formatExecutorPositions(positions) {
     totalEst24hUsd += est24hUsd;
 
     lines.push(
-      `\n${i + 1}. <b>${pair}</b> (${pos.fee}% ${versionTag}) - Position #${pos.tokenId}` +
+      `\n${i + 1}. <b>${pair}</b> (${pos.fee}%) - Position #${pos.tokenId}` +
         depositLine +
         currentLine +
         unclaimedLine +
