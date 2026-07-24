@@ -436,8 +436,14 @@ async function getExecutorPositions() {
             const dec1 = sym1 === 'USDG' ? 6 : 18;
 
             if (pMin > 0 && pMax > 0) {
-              const pMinRaw = pMin * Math.pow(10, dec1 - dec0);
-              const pMaxRaw = pMax * Math.pow(10, dec1 - dec0);
+              let pMinRaw, pMaxRaw;
+              if (sym0 === 'USDG') {
+                pMinRaw = (1 / pMax) * Math.pow(10, dec1 - dec0);
+                pMaxRaw = (1 / pMin) * Math.pow(10, dec1 - dec0);
+              } else {
+                pMinRaw = pMin * Math.pow(10, dec1 - dec0);
+                pMaxRaw = pMax * Math.pow(10, dec1 - dec0);
+              }
 
               const tLower = Math.floor(Math.log(pMinRaw) / Math.log(1.0001));
               const tUpper = Math.floor(Math.log(pMaxRaw) / Math.log(1.0001));
@@ -476,8 +482,7 @@ async function getExecutorPositions() {
             const pnlUsd = depTotalUsd > 0 ? totalPosUsd - depTotalUsd : 0;
             const pnlPercent = depTotalUsd > 0 ? (pnlUsd / depTotalUsd) * 100 : 0;
 
-            const estEarnUsd = unclaimedUsd > 0 ? unclaimedUsd : Math.max(0, pnlUsd);
-            const est24hUsd = (estEarnUsd / ageHours) * 24;
+            const est24hUsd = unclaimedUsd > 0 ? (unclaimedUsd / ageHours) * 24 : 0;
             const baseForYield = depTotalUsd > 0 ? depTotalUsd : (totalUsd > 0 ? totalUsd : 0);
             const est24hPercent = baseForYield > 0 ? (est24hUsd / baseForYield) * 100 : 0;
 
