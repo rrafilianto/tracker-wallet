@@ -31,11 +31,128 @@ const UNISWAP_V3_SWAP_ROUTER_ABI = [
   'function exactInputSingle(tuple(address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 deadline, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96)) payable returns (uint256 amountOut)'
 ];
 
+const UNISWAP_V3_FACTORY_ABI = [
+  'function getPool(address token0, address token1, uint24 fee) view returns (address)'
+];
+
+const UNISWAP_V3_POOL_ABI = [
+  'function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)'
+];
+
 // Addresses on Robinhood Chain
 const UNISWAP_V3_NFPM_ADDRESS = process.env.UNISWAP_V3_NFPM_ADDRESS || '0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3';
 const UNISWAP_V4_POSM_ADDRESS = process.env.UNISWAP_V4_POSM_ADDRESS || '0x58daec3116aae6D93017bAAea7749052E8a04fA7';
 const UNISWAP_V3_ROUTER_ADDRESS = process.env.UNISWAP_V3_ROUTER_ADDRESS || '0xE592427A0AEce92De3Edee1F18E0157C05861564';
 const USDG_ADDRESS = process.env.USDG_ADDRESS || '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168';
+
+function getAmountsForLiquidity(liquidityStr, tickCurrent, tickLower, tickUpper, dec0 = 18, dec1 = 18) {
+  try {
+    const liq = Number(liquidityStr);
+    if (isNaN(liq) || liq <= 0) return { amount0: 0, amount1: 0 };
+
+    const tLower = Number(tickLower);
+    const tUpper = Number(tickUpper);
+    const tCurr = Number(tickCurrent);
+
+    const sqrtRatioA = Math.pow(1.0001, tLower / 2);
+    const sqrtRatioB = Math.pow(1.0001, tUpper / 2);
+
+    let amount0Raw = 0;
+    let amount1Raw = 0;
+
+    if (tCurr < tLower) {
+      amount0Raw = (liq * (sqrtRatioB - sqrtRatioA)) / (sqrtRatioA * sqrtRatioB);
+      amount1Raw = 0;
+    } else if (tCurr >= tUpper) {
+      amount1Raw = liq * (sqrtRatioB - sqrtRatioA);
+      amount0Raw = 0;
+    } else {
+      const sqrtRatioCurrent = Math.pow(1.0001, tCurr / 2);
+      amount0Raw = (liq * (sqrtRatioB - sqrtRatioCurrent)) / (sqrtRatioCurrent * sqrtRatioB);
+      amount1Raw = liq * (sqrtRatioCurrent - sqrtRatioA);
+    }
+
+    const amount0 = Math.max(0, amount0Raw / Math.pow(10, dec0));
+    const amount1 = Math.max(0, amount1Raw / Math.pow(10, dec1));
+
+    return { amount0, amount1 };
+  } catch {
+    return { amount0: 0, amount1: 0 };
+  }
+}
+
+function calculatePositionUsd(amount0, amount1, token0Addr, token1Addr, sqrtPriceX96, dec0 = 18, dec1 = 18) {
+  try {
+    let price0Usd = 0;
+    let price1Usd = 0;
+
+    const isToken0Usdg = token0Addr && token0Addr.toLowerCase() === USDG_ADDRESS.toLowerCase();
+    const isToken1Usdg = token1Addr && token1Addr.toLowerCase() === USDG_ADDRESS.toLowerCase();
+
+    if (sqrtPriceX96 && BigInt(sqrtPriceX96) > 0n) {
+      const sqrtRatio = Number(sqrtPriceX96) / Math.pow(2, 96);
+      const rawPrice = sqrtRatio * sqrtRatio; // token1 per token0 (unadjusted)
+      const token0PriceInToken1 = rawPrice * Math.pow(10, Number(dec0) - Number(dec1));
+
+      if (isToken1Usdg) {
+        price0Usd = token0PriceInToken1;
+        price1Usd = 1.0;
+      } else if (isToken0Usdg) {
+        price0Usd = 1.0;
+        price1Usd = token0PriceInToken1 > 0 ? 1 / token0PriceInToken1 : 0;
+      } else {
+        price0Usd = 0;
+        price1Usd = 0;
+      }
+    } else {
+      if (isToken0Usdg) price0Usd = 1.0;
+      if (isToken1Usdg) price1Usd = 1.0;
+    }
+
+    const totalUsd = amount0 * price0Usd + amount1 * price1Usd;
+    return { totalUsd, price0Usd, price1Usd };
+  } catch {
+    return { totalUsd: 0, price0Usd: 0, price1Usd: 0 };
+  }
+}
+
+async function fetchMintDeposit(mintTxHash, walletAddr, token0Addr, token1Addr, dec0 = 18, dec1 = 18, sqrtPriceX96 = 0n) {
+  if (!mintTxHash || !walletAddr) return { depAmount0: 0, depAmount1: 0, depTotalUsd: 0 };
+  try {
+    const res = await fetch(`https://robinhoodchain.blockscout.com/api/v2/transactions/${mintTxHash}`);
+    const data = await res.json();
+    if (!data.token_transfers) return { depAmount0: 0, depAmount1: 0, depTotalUsd: 0 };
+
+    const walletLower = walletAddr.toLowerCase();
+    let depAmount0 = 0;
+    let depAmount1 = 0;
+
+    data.token_transfers.forEach(t => {
+      const fromAddr = t.from?.hash?.toLowerCase();
+      if (fromAddr === walletLower) {
+        const tAddr = t.token?.address_hash?.toLowerCase();
+        const rawVal = BigInt(t.total?.value || '0');
+        const decimals = Number(t.token?.decimals || 18);
+        const val = Number(rawVal) / Math.pow(10, decimals);
+
+        if (token0Addr && tAddr === token0Addr.toLowerCase()) {
+          depAmount0 += val;
+        } else if (token1Addr && tAddr === token1Addr.toLowerCase()) {
+          depAmount1 += val;
+        } else if (decimals === dec0) {
+          depAmount0 += val;
+        } else if (decimals === dec1) {
+          depAmount1 += val;
+        }
+      }
+    });
+
+    const { totalUsd: depTotalUsd } = calculatePositionUsd(depAmount0, depAmount1, token0Addr, token1Addr, sqrtPriceX96, dec0, dec1);
+    return { depAmount0, depAmount1, depTotalUsd };
+  } catch {
+    return { depAmount0: 0, depAmount1: 0, depTotalUsd: 0 };
+  }
+}
 
 function getRobinhoodRpcUrl() {
   if (process.env.ALCHEMY_RPC_URL) return process.env.ALCHEMY_RPC_URL;
@@ -121,16 +238,19 @@ async function getExecutorPositions() {
   const provider = wallet.provider;
   const positions = [];
 
-  // Fetch NFT mint timestamps dynamically from Blockscout for exact Age calculation
+  // Fetch NFT mint timestamps & mint tx hashes dynamically from Blockscout
   const nftMintTsMap = {};
+  const nftMintTxMap = {};
   try {
     const resTs = await fetch(`https://robinhoodchain.blockscout.com/api/v2/addresses/${wallet.address}/token-transfers?type=ERC-721`);
     const dataTs = await resTs.json();
     if (dataTs.items) {
       dataTs.items.forEach(item => {
         const tid = item.total?.token_id;
-        if (tid && item.timestamp && !nftMintTsMap[tid]) {
-          nftMintTsMap[tid] = item.timestamp;
+        const txHash = item.transaction_hash || item.tx_hash;
+        if (tid && !nftMintTsMap[tid]) {
+          if (item.timestamp) nftMintTsMap[tid] = item.timestamp;
+          if (txHash) nftMintTxMap[tid] = txHash;
         }
       });
     }
@@ -152,20 +272,89 @@ async function getExecutorPositions() {
         const token0Contract = new ethers.Contract(pos.token0, ERC20_ABI, provider);
         const token1Contract = new ethers.Contract(pos.token1, ERC20_ABI, provider);
 
-        const [sym0, sym1] = await Promise.all([
+        const [sym0, sym1, dec0Raw, dec1Raw] = await Promise.all([
           token0Contract.symbol().catch(() => 'TOKEN0'),
-          token1Contract.symbol().catch(() => 'TOKEN1')
+          token1Contract.symbol().catch(() => 'TOKEN1'),
+          token0Contract.decimals().catch(() => 18n),
+          token1Contract.decimals().catch(() => 18n)
         ]);
+
+        const dec0 = Number(dec0Raw);
+        const dec1 = Number(dec1Raw);
+
+        let currentTick = 0;
+        let sqrtPriceX96 = 0n;
+        try {
+          const factoryAddr = await v3Nfpm.factory().catch(() => '0x33128a8fC17869897dcE68Ed026d694621f6FDfD');
+          const factory = new ethers.Contract(factoryAddr, UNISWAP_V3_FACTORY_ABI, provider);
+          const poolAddress = await factory.getPool(pos.token0, pos.token1, pos.fee);
+          if (poolAddress && poolAddress !== ethers.ZeroAddress) {
+            const poolContract = new ethers.Contract(poolAddress, UNISWAP_V3_POOL_ABI, provider);
+            const slot0 = await poolContract.slot0();
+            sqrtPriceX96 = slot0.sqrtPriceX96;
+            currentTick = Number(slot0.tick);
+          } else {
+            currentTick = Math.floor((Number(pos.tickLower) + Number(pos.tickUpper)) / 2);
+          }
+        } catch {
+          currentTick = Math.floor((Number(pos.tickLower) + Number(pos.tickUpper)) / 2);
+        }
+
+        const { amount0, amount1 } = getAmountsForLiquidity(pos.liquidity, currentTick, pos.tickLower, pos.tickUpper, dec0, dec1);
+        const { totalUsd } = calculatePositionUsd(amount0, amount1, pos.token0, pos.token1, sqrtPriceX96, dec0, dec1);
+
+        // Unclaimed fees (tokensOwed0 & tokensOwed1)
+        let unclaimed0 = 0;
+        let unclaimed1 = 0;
+        let unclaimedUsd = 0;
+        if (pos.tokensOwed0 !== undefined && pos.tokensOwed1 !== undefined) {
+          unclaimed0 = Number(pos.tokensOwed0) / Math.pow(10, dec0);
+          unclaimed1 = Number(pos.tokensOwed1) / Math.pow(10, dec1);
+          const resFees = calculatePositionUsd(unclaimed0, unclaimed1, pos.token0, pos.token1, sqrtPriceX96, dec0, dec1);
+          unclaimedUsd = resFees.totalUsd;
+        }
+
+        // Initial deposit calculation
+        const mintTxHash = nftMintTxMap[tid.toString()];
+        const { depAmount0, depAmount1, depTotalUsd } = await fetchMintDeposit(mintTxHash, wallet.address, pos.token0, pos.token1, dec0, dec1, sqrtPriceX96);
+
+        // 24h fee earnings estimation
+        const mintTsStr = nftMintTsMap[tid.toString()];
+        let ageHours = 24;
+        if (mintTsStr) {
+          const ageMs = Date.now() - new Date(mintTsStr).getTime();
+          ageHours = Math.max(0.5, ageMs / (1000 * 3600));
+        }
+        const est24hUsd = (unclaimedUsd / ageHours) * 24;
+        const baseForYield = depTotalUsd > 0 ? depTotalUsd : (totalUsd > 0 ? totalUsd : 0);
+        const est24hPercent = baseForYield > 0 ? (est24hUsd / baseForYield) * 100 : 0;
+
+        const totalPosUsd = totalUsd + unclaimedUsd;
+        const pnlUsd = depTotalUsd > 0 ? totalPosUsd - depTotalUsd : 0;
+        const pnlPercent = depTotalUsd > 0 ? (pnlUsd / depTotalUsd) * 100 : 0;
 
         positions.push({
           tokenId: tid.toString(),
           symbol0: sym0,
           symbol1: sym1,
+          amount0,
+          amount1,
+          totalUsd,
+          depAmount0,
+          depAmount1,
+          depTotalUsd,
+          unclaimed0,
+          unclaimed1,
+          unclaimedUsd,
+          est24hUsd,
+          est24hPercent,
+          pnlUsd,
+          pnlPercent,
           fee: Number(pos.fee) / 10000,
           liquidity: pos.liquidity.toString(),
           ageStr: formatAgeFromTimestamp(nftMintTsMap[tid.toString()]),
-          tickLower: pos.tickLower,
-          tickUpper: pos.tickUpper,
+          tickLower: pos.tickLower.toString(),
+          tickUpper: pos.tickUpper.toString(),
           isV4: false
         });
       } catch {
@@ -199,6 +388,8 @@ async function getExecutorPositions() {
             let sym1 = 'TOKEN1';
             let fee = 0;
             let range = 'Concentrated';
+            let pMin = 0;
+            let pMax = 0;
 
             if (uriData.startsWith('data:application/json;base64,')) {
               const jsonStr = Buffer.from(uriData.replace('data:application/json;base64,', ''), 'base64').toString('utf-8');
@@ -216,10 +407,59 @@ async function getExecutorPositions() {
                 }
                 const rangeParts = parts[3].split('<>');
                 if (rangeParts.length === 2) {
+                  pMin = parseFloat(rangeParts[0]);
+                  pMax = parseFloat(rangeParts[1]);
                   range = `$${rangeParts[0]} - $${rangeParts[1]}`;
                 }
               }
             }
+
+            let amount0 = 0;
+            let amount1 = 0;
+            let totalUsd = 0;
+
+            const dec0 = sym0 === 'USDG' ? 6 : 18;
+            const dec1 = sym1 === 'USDG' ? 6 : 18;
+
+            if (pMin > 0 && pMax > 0) {
+              const tLower = Math.floor(Math.log(pMin) / Math.log(1.0001));
+              const tUpper = Math.floor(Math.log(pMax) / Math.log(1.0001));
+              const tCurr = Math.floor((tLower + tUpper) / 2);
+              const resLiq = getAmountsForLiquidity(liq.toString(), tCurr, tLower, tUpper, dec0, dec1);
+              amount0 = resLiq.amount0;
+              amount1 = resLiq.amount1;
+              const pMid = Math.sqrt(pMin * pMax);
+
+              if (sym0 === 'USDG') {
+                totalUsd = amount0 + amount1 * pMid;
+              } else if (sym1 === 'USDG') {
+                totalUsd = amount0 * pMid + amount1;
+              } else {
+                totalUsd = amount0 + amount1;
+              }
+            }
+
+            // Initial deposit calculation for V4
+            const mintTxHash = nftMintTxMap[tid];
+            const { depAmount0, depAmount1, depTotalUsd } = await fetchMintDeposit(mintTxHash, wallet.address, null, null, dec0, dec1, 0n);
+
+            const unclaimed0 = 0;
+            const unclaimed1 = 0;
+            const unclaimedUsd = 0;
+
+            const mintTsStr = nftMintTsMap[tid];
+            let ageHours = 24;
+            if (mintTsStr) {
+              const ageMs = Date.now() - new Date(mintTsStr).getTime();
+              ageHours = Math.max(0.5, ageMs / (1000 * 3600));
+            }
+            const est24hUsd = (unclaimedUsd / ageHours) * 24;
+            const baseForYield = depTotalUsd > 0 ? depTotalUsd : (totalUsd > 0 ? totalUsd : 0);
+            const est24hPercent = baseForYield > 0 ? (est24hUsd / baseForYield) * 100 : 0;
+
+            const totalPosUsd = totalUsd + unclaimedUsd;
+            const pnlUsd = depTotalUsd > 0 ? totalPosUsd - depTotalUsd : 0;
+            const pnlPercent = depTotalUsd > 0 ? (pnlUsd / depTotalUsd) * 100 : 0;
 
             const ageStr = formatAgeFromTimestamp(nftMintTsMap[tid]);
 
@@ -227,6 +467,19 @@ async function getExecutorPositions() {
               tokenId: tid,
               symbol0: sym0,
               symbol1: sym1,
+              amount0,
+              amount1,
+              totalUsd,
+              depAmount0,
+              depAmount1,
+              depTotalUsd,
+              unclaimed0,
+              unclaimed1,
+              unclaimedUsd,
+              est24hUsd,
+              est24hPercent,
+              pnlUsd,
+              pnlPercent,
               fee: fee,
               liquidity: liq.toString(),
               ageStr: ageStr,

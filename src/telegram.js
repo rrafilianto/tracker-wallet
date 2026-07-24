@@ -276,19 +276,75 @@ function formatExecutorPositions(positions) {
     };
   }
 
+  let totalPortfolioUsd = 0;
+  let totalDepUsd = 0;
+  let totalUnclaimedUsd = 0;
+  let totalEst24hUsd = 0;
+
   const lines = [`🏊 <b>Active Liquidity Positions (${positions.length})</b>`];
   const keyboard = [];
 
   positions.forEach((pos, i) => {
     const pair = pos.symbol1 ? `${pos.symbol0}/${pos.symbol1}` : pos.symbol0;
     const versionTag = pos.isV4 !== false ? 'V4' : 'V3';
-    const liqStr = pos.liquidity; // Raw on-chain liquidity number
     const rangeStr = pos.tickUpper ? `${pos.tickLower} <> ${pos.tickUpper}` : pos.tickLower;
     const ageStr = pos.ageStr || '-';
 
+    // Deposit line
+    const dep0Str = formatCompactNumber(pos.depAmount0 || 0);
+    const dep1Str = formatCompactNumber(pos.depAmount1 || 0);
+    const depTokens = pos.symbol1 ? `${dep0Str} ${pos.symbol0} + ${dep1Str} ${pos.symbol1}` : `${dep0Str} ${pos.symbol0}`;
+    const depUsdStr = (pos.depTotalUsd || 0) > 0 ? ` (~$${pos.depTotalUsd.toFixed(2)} USD)` : '';
+    const depositLine = (pos.depAmount0 > 0 || pos.depAmount1 > 0 || pos.depTotalUsd > 0)
+      ? `\n   Deposit: <b>${depTokens}${depUsdStr}</b>`
+      : '';
+
+    // Current line
+    const amt0Str = formatCompactNumber(pos.amount0 || 0);
+    const amt1Str = formatCompactNumber(pos.amount1 || 0);
+    const currTokens = pos.symbol1 ? `${amt0Str} ${pos.symbol0} + ${amt1Str} ${pos.symbol1}` : `${amt0Str} ${pos.symbol0}`;
+    const posUsd = pos.totalUsd || 0;
+    const usdStr = posUsd > 0 ? ` (~$${posUsd.toFixed(2)} USD)` : '';
+    const currentLine = `\n   Current: <b>${currTokens}${usdStr}</b>`;
+
+    // Unclaimed fees line
+    const unc0Str = formatCompactNumber(pos.unclaimed0 || 0);
+    const unc1Str = formatCompactNumber(pos.unclaimed1 || 0);
+    const uncUsd = pos.unclaimedUsd || 0;
+    const unclaimedTokens = pos.symbol1 ? `${unc0Str} ${pos.symbol0} + ${unc1Str} ${pos.symbol1}` : `${unc0Str} ${pos.symbol0}`;
+    const uncUsdStr = uncUsd > 0 ? ` (~$${uncUsd.toFixed(2)} USD)` : '';
+    const unclaimedLine = (pos.unclaimed0 > 0 || pos.unclaimed1 > 0 || uncUsd > 0)
+      ? `\n   Unclaimed Fees: <b>${unclaimedTokens}${uncUsdStr}</b>`
+      : '';
+
+    // 24h Fees line
+    const est24hUsd = pos.est24hUsd || 0;
+    const est24hPercent = pos.est24hPercent || 0;
+    const est24hLine = est24hUsd > 0
+      ? `\n   24h Est. Fees: <b>+$${est24hUsd.toFixed(2)} USD/day (+${est24hPercent.toFixed(2)}%/day) ⚡</b>`
+      : '';
+
+    // PnL line
+    const pnlUsd = pos.pnlUsd || 0;
+    const pnlPercent = pos.pnlPercent || 0;
+    const pnlEmoji = pnlUsd >= 0 ? '📈' : '📉';
+    const pnlSign = pnlUsd >= 0 ? '+' : '';
+    const pnlLine = (pos.depTotalUsd || 0) > 0
+      ? `\n   PnL: <b>${pnlSign}$${pnlUsd.toFixed(2)} USD (${pnlSign}${pnlPercent.toFixed(2)}%) ${pnlEmoji}</b>`
+      : '';
+
+    totalPortfolioUsd += posUsd;
+    totalDepUsd += (pos.depTotalUsd || 0);
+    totalUnclaimedUsd += uncUsd;
+    totalEst24hUsd += est24hUsd;
+
     lines.push(
       `\n${i + 1}. <b>${pair}</b> (${pos.fee}% ${versionTag}) - Position #${pos.tokenId}` +
-        `\n   Liquidity: <b>${liqStr}</b>` +
+        depositLine +
+        currentLine +
+        unclaimedLine +
+        est24hLine +
+        pnlLine +
         `\n   Age: <b>${ageStr}</b>` +
         `\n   Price Range: <b>${rangeStr}</b>`,
     );
@@ -300,6 +356,24 @@ function formatExecutorPositions(positions) {
       },
     ]);
   });
+
+  const totalValueWithFees = totalPortfolioUsd + totalUnclaimedUsd;
+  const netPnlUsd = totalDepUsd > 0 ? totalValueWithFees - totalDepUsd : 0;
+  const netPnlPercent = totalDepUsd > 0 ? (netPnlUsd / totalDepUsd) * 100 : 0;
+  const pnlSign = netPnlUsd >= 0 ? '+' : '';
+
+  let summaryHeader = `💰 <b>Total Positions Value: ~$${totalPortfolioUsd.toFixed(2)} USD</b>`;
+  if (totalUnclaimedUsd > 0) {
+    summaryHeader += ` (Unclaimed: ~$${totalUnclaimedUsd.toFixed(2)} USD)`;
+  }
+  if (totalEst24hUsd > 0) {
+    summaryHeader += ` | 24h Est: <b>+$${totalEst24hUsd.toFixed(2)} USD/day</b>`;
+  }
+  if (totalDepUsd > 0) {
+    summaryHeader += ` | PnL: <b>${pnlSign}$${netPnlUsd.toFixed(2)} (${pnlSign}${netPnlPercent.toFixed(1)}%)</b>`;
+  }
+
+  lines.unshift(summaryHeader + '\n');
 
   return {
     text: lines.join('\n'),
