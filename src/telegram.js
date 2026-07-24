@@ -1,4 +1,5 @@
-const { TelegramBot } = require('node-telegram-bot-api');
+const RawTelegramBot = require('node-telegram-bot-api');
+const TelegramBot = typeof RawTelegramBot === 'function' ? RawTelegramBot : (RawTelegramBot.default || RawTelegramBot.TelegramBot);
 
 let bot = null;
 let chatId = null;

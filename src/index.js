@@ -18,6 +18,8 @@ let wallets = config.loadWallets();
 let lastTxMap = {};
 
 const bot = tg.init(config.TELEGRAM_BOT_TOKEN, config.TELEGRAM_CHAT_ID);
+console.log('🚀 [STARTUP] Tracker Wallet Bot initialized successfully!');
+console.log(`📱 [TELEGRAM] Connected & Polling active for Chat ID: ${config.TELEGRAM_CHAT_ID}`);
 
 function send(chatId, text, opts = {}) {
   return bot.sendMessage(chatId, text, { parse_mode: 'HTML', ...opts });
