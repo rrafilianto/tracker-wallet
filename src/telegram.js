@@ -27,6 +27,24 @@ function displayName(wallet) {
   return shortAddr(wallet.address);
 }
 
+function formatWibTime(ts) {
+  if (!ts) return '';
+  const date = new Date((typeof ts === 'number' ? ts : parseInt(ts)) * 1000);
+  const parts = new Intl.DateTimeFormat('id-ID', {
+    timeZone: 'Asia/Jakarta',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+  const p = {};
+  parts.forEach((item) => { p[item.type] = item.value; });
+  return `${p.day}/${p.month}/${p.year}, ${p.hour}:${p.minute}:${p.second} WIB`;
+}
+
 function formatTx(activity, wallet) {
   const name = wallet.label || shortAddr(wallet.address);
   const lines = [`🔔 <b>[${chainLabel(wallet.chain)}] ${name}</b>`];
@@ -57,7 +75,7 @@ function formatTx(activity, wallet) {
     const usd = usdVal ? `$${Number(usdVal).toLocaleString()}` : '';
     const tokenAmt = tx.token_amount || tx.amount;
     const amount = tokenAmt && Number(tokenAmt) > 0 ? `${Number(tokenAmt).toFixed(4)}` : '';
-    const time = tx.timestamp ? new Date((typeof tx.timestamp === 'number' ? tx.timestamp : parseInt(tx.timestamp)) * 1000).toLocaleString() : '';
+    const time = formatWibTime(tx.timestamp);
 
     lines.push(`${i + 1}. ${type} <b>${symbol}</b>${shortHash}`);
 
