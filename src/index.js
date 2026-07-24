@@ -138,15 +138,15 @@ async function handleCommand(msg) {
     case '/start':
     case '/help': {
       await send(cid,
-        '<b>Wallet Tracker Bot</b>\n\n' +
-        '/track &lt;address&gt; [chain] — Start tracking\n' +
-        '/untrack &lt;address&gt; — Stop tracking\n' +
+        '<b>Robinhood Wallet Tracker Bot</b>\n\n' +
+        '/track &lt;address&gt; — Track wallet on Robinhood Chain\n' +
+        '/untrack &lt;address&gt; — Stop tracking wallet\n' +
         '/tag &lt;address&gt; &lt;label&gt; — Set wallet nickname\n' +
         '/list — List tracked wallets\n' +
-        '/stats &lt;address&gt; [chain] — Get wallet stats & balance\n' +
+        '/stats &lt;address&gt; — Get wallet stats & balance\n' +
         '/mywallet — View executor wallet balance\n' +
         '/mypools — View & close active Uniswap liquidity pools\n' +
-        '/chains — Show available chains'
+        '/chains — Show supported chain'
       );
       break;
     }
@@ -172,31 +172,25 @@ async function handleCommand(msg) {
       break;
     }
     case '/chains': {
-      const list = gmgn.VALID_CHAINS.map((c) => `• <code>${c}</code>`).join('\n');
-      await send(cid, `<b>Supported Chains</b>\n${list}\n\nUsage: /track &lt;addr&gt; <code>&lt;chain&gt;</code>`);
+      await send(cid, '<b>Supported Chain</b>\n• <code>robinhood</code> (Robinhood Chain)\n\nUsage: /track &lt;wallet_address&gt;');
       break;
     }
     case '/track': {
       const addr = parts[1];
-      const chain = (parts[2] || '').toLowerCase();
       if (!addr || addr.length < 10) {
-        await send(cid, 'Usage: /track &lt;wallet_address&gt; [chain]');
-        return;
-      }
-      if (chain && !gmgn.VALID_CHAINS.includes(chain)) {
-        await send(cid, `Invalid chain. Options: ${gmgn.VALID_CHAINS.join(', ')}`);
+        await send(cid, 'Usage: /track &lt;wallet_address&gt;');
         return;
       }
       if (findWallet(addr)) {
         await send(cid, 'Already tracking this wallet.');
         return;
       }
-      const resolvedChain = chain || gmgn.detectChain(addr);
+      const resolvedChain = 'robinhood';
       wallets.push({ address: addr, chain: resolvedChain });
       config.saveWallets(wallets);
       alchemyListener.trackWallet(addr, resolvedChain);
       lastTxMap[addr] = undefined;
-      await send(cid, `✅ [${resolvedChain.toUpperCase()}] Tracking <code>${tg.shortAddr(addr)}</code> (Hybrid Instant WS Active)`);
+      await send(cid, `✅ [ROBINHOOD] Tracking <code>${tg.shortAddr(addr)}</code> (Hybrid Instant WS Active)`);
       await pollWallet({ address: addr, chain: resolvedChain });
       break;
     }
@@ -219,41 +213,39 @@ async function handleCommand(msg) {
       }
       const wallet = findWallet(addr);
       if (!wallet) {
-        await send(cid, 'Wallet not tracked. Use /track first.');
+        await send(cid, 'Wallet not found in track list. Add it with /track first.');
         return;
       }
       wallet.label = label;
       config.saveWallets(wallets);
-      await send(cid, `🏷️ <b>${label}</b> → <code>${tg.shortAddr(addr)}</code>`);
+      await send(cid, `🏷 Tagged <code>${tg.shortAddr(addr)}</code> as <b>${label}</b>`);
       break;
     }
     case '/list': {
-      if (!wallets.length) {
-        await send(cid, 'No wallets tracked. Use /track &lt;address&gt; [chain]');
+      if (wallets.length === 0) {
+        await send(cid, 'No wallets currently tracked. Use /track &lt;address&gt;');
         return;
       }
-      const lines = wallets.map((w, i) => {
-        const name = w.label || '—';
-        return `${i + 1}. [${w.chain.toUpperCase()}] <code>${w.address}</code>\n   🏷️ ${name}`;
-      });
-      await send(cid, `📋 <b>Tracked (${wallets.length})</b>\n${lines.join('\n')}`);
+      const lines = wallets.map(
+        (w) => `• <code>${tg.shortAddr(w.address)}</code> ${w.label ? `(<b>${w.label}</b>)` : ''} [ROBINHOOD]`
+      );
+      await send(cid, `<b>Tracked Wallets (${wallets.length})</b>\n${lines.join('\n')}`);
       break;
     }
     case '/stats': {
       const addr = parts[1];
-      const chain = (parts[2] || '').toLowerCase();
-      if (!addr) { await send(cid, 'Usage: /stats &lt;wallet_address&gt; [chain]'); return; }
-      const resolvedChain = chain || gmgn.detectChain(addr);
+      if (!addr) {
+        await send(cid, 'Usage: /stats &lt;wallet_address&gt;');
+        return;
+      }
+      const wallet = findWallet(addr) || { address: addr, chain: 'robinhood' };
       try {
-        const [stats, holdings] = await Promise.all([
-          gmgn.getWalletStats(config.GMGN_API_KEY, addr, '7d', resolvedChain),
-          gmgn.getWalletHoldings(config.GMGN_API_KEY, addr, resolvedChain).catch(() => null),
-        ]);
-        let response = tg.formatStats(stats, addr, resolvedChain);
-        if (holdings) response += '\n\n' + tg.formatHoldings(holdings);
-        await send(cid, response);
+        const stats = await gmgn.getWalletStats(config.GMGN_API_KEY, wallet.address, '7d');
+        const holdings = await gmgn.getWalletHoldings(config.GMGN_API_KEY, wallet.address);
+        await send(cid, tg.formatStats(stats, wallet));
+        await send(cid, tg.formatHoldings(holdings));
       } catch (err) {
-        await send(cid, `Error: ${err.message}`);
+        await send(cid, `Error fetching stats for ${tg.shortAddr(addr)}: ${err.message}`);
       }
       break;
     }

@@ -2,8 +2,8 @@ const crypto = require('crypto');
 
 const BASE_URL = 'https://openapi.gmgn.ai/v1';
 
-function detectChain(address) {
-  return address.startsWith('0x') ? 'eth' : 'sol';
+function detectChain() {
+  return 'robinhood';
 }
 
 function buildUrl(endpoint, params) {
@@ -34,29 +34,29 @@ async function gmgnFetch(apiKey, endpoint, params = {}) {
   return json.data;
 }
 
-function resolveChain(address, chain) {
-  return chain || detectChain(address);
+function resolveChain() {
+  return 'robinhood';
 }
 
-function getWalletActivity(apiKey, address, limit = 10, chain) {
+function getWalletActivity(apiKey, address, limit = 10) {
   return gmgnFetch(apiKey, '/user/wallet_activity', {
-    chain: resolveChain(address, chain),
+    chain: 'robinhood',
     wallet_address: address,
     limit,
   });
 }
 
-function getWalletStats(apiKey, address, period = '7d', chain) {
+function getWalletStats(apiKey, address, period = '7d') {
   return gmgnFetch(apiKey, '/user/wallet_stats', {
-    chain: resolveChain(address, chain),
+    chain: 'robinhood',
     wallet_address: address,
     period,
   });
 }
 
-function getWalletHoldings(apiKey, address, chain) {
+function getWalletHoldings(apiKey, address) {
   return gmgnFetch(apiKey, '/user/wallet_holdings', {
-    chain: resolveChain(address, chain),
+    chain: 'robinhood',
     wallet_address: address,
     limit: 20,
     order_by: 'usd_value',
@@ -69,5 +69,5 @@ module.exports = {
   getWalletStats,
   getWalletHoldings,
   detectChain,
-  VALID_CHAINS: ['sol', 'eth', 'bsc', 'base', 'robinhood'],
+  VALID_CHAINS: ['robinhood'],
 };

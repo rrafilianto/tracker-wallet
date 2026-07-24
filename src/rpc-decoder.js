@@ -1,35 +1,19 @@
 const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 
-const RPC_ENDPOINTS = {
-  eth: ['https://cloudflare-eth.com', 'https://eth.llamarpc.com'],
-  bsc: ['https://bsc-dataseed.binance.org', 'https://bsc-dataseed1.defibit.org'],
-  base: ['https://mainnet.base.org', 'https://base.llamarpc.com'],
-  sol: ['https://api.mainnet-beta.solana.com', 'https://solana-rpc.publicnode.com']
-};
-
-function getChainRpcs(chain) {
+function getChainRpcs() {
   const alchemyKey = process.env.ALCHEMY_API_KEY;
   const alchemyUrl = process.env.ALCHEMY_RPC_URL;
   const list = [];
 
   if (alchemyUrl) list.push(alchemyUrl);
   if (alchemyKey && alchemyKey !== 'your_alchemy_api_key_here') {
-    const alchemyMap = {
-      robinhood: `https://robinhood-mainnet.g.alchemy.com/v2/${alchemyKey}`,
-      eth: `https://eth-mainnet.g.alchemy.com/v2/${alchemyKey}`,
-      base: `https://base-mainnet.g.alchemy.com/v2/${alchemyKey}`,
-      bsc: `https://bnb-mainnet.g.alchemy.com/v2/${alchemyKey}`,
-    };
-    if (alchemyMap[chain]) list.push(alchemyMap[chain]);
+    list.push(`https://robinhood-mainnet.g.alchemy.com/v2/${alchemyKey}`);
   }
-
-  const defaults = RPC_ENDPOINTS[chain] || RPC_ENDPOINTS.eth || [];
-  return [...list, ...defaults];
+  list.push('https://robinhood-mainnet.g.alchemy.com/v2/demo');
+  return list;
 }
 
-const BLOCKSCOUT_APIS = {
-  robinhood: 'https://robinhoodchain.blockscout.com/api/v2/transactions'
-};
+const BLOCKSCOUT_API = 'https://robinhoodchain.blockscout.com/api/v2/transactions';
 
 function padAddress(addr) {
   return '0x' + addr.toLowerCase().replace(/^0x/, '').padStart(64, '0');
@@ -40,10 +24,8 @@ function cleanAddress(topic) {
 }
 
 async function getBlockscoutTransfers(chain, txHash, walletAddress) {
-  const baseUrl = BLOCKSCOUT_APIS[chain];
-  if (!baseUrl) return [];
   try {
-    const res = await fetch(`${baseUrl}/${txHash}/token-transfers`);
+    const res = await fetch(`${BLOCKSCOUT_API}/${txHash}/token-transfers`);
     const data = await res.json();
     if (!data.items) return [];
 
@@ -85,12 +67,10 @@ async function getBlockscoutTransfers(chain, txHash, walletAddress) {
 }
 
 async function getEvmReceiptTransfers(chain, txHash, walletAddress) {
-  if (chain === 'robinhood') {
-    const bsTransfers = await getBlockscoutTransfers(chain, txHash, walletAddress);
-    if (bsTransfers.length > 0) return bsTransfers;
-  }
+  const bsTransfers = await getBlockscoutTransfers(chain, txHash, walletAddress);
+  if (bsTransfers.length > 0) return bsTransfers;
 
-  const rpcs = getChainRpcs(chain);
+  const rpcs = getChainRpcs();
   const paddedWallet = padAddress(walletAddress);
 
   for (const rpcUrl of rpcs) {
@@ -135,74 +115,6 @@ async function getEvmReceiptTransfers(chain, txHash, walletAddress) {
   return [];
 }
 
-async function getSolanaTransfers(txHash, walletAddress) {
-  const rpcs = RPC_ENDPOINTS.sol;
-  for (const rpcUrl of rpcs) {
-    try {
-      const res = await fetch(rpcUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: 1,
-          method: 'getTransaction',
-          params: [txHash, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0 }]
-        })
-      });
-      const json = await res.json();
-      if (!json.result || !json.result.meta) continue;
-
-      const meta = json.result.meta;
-      const preBalances = meta.preTokenBalances || [];
-      const postBalances = meta.postTokenBalances || [];
-      const accountMap = {};
-
-      preBalances.forEach(item => {
-        if (item.owner === walletAddress) {
-          accountMap[item.accountIndex] = {
-            mint: item.mint,
-            pre: Number(item.uiTokenAmount.uiAmount || 0),
-            post: 0,
-            symbol: item.uiTokenAmount.symbol
-          };
-        }
-      });
-
-      postBalances.forEach(item => {
-        if (item.owner === walletAddress) {
-          if (!accountMap[item.accountIndex]) {
-            accountMap[item.accountIndex] = {
-              mint: item.mint,
-              pre: 0,
-              post: Number(item.uiTokenAmount.uiAmount || 0),
-              symbol: item.uiTokenAmount.symbol
-            };
-          } else {
-            accountMap[item.accountIndex].post = Number(item.uiTokenAmount.uiAmount || 0);
-          }
-        }
-      });
-
-      const transfers = [];
-      Object.values(accountMap).forEach(info => {
-        const delta = info.post - info.pre;
-        if (Math.abs(delta) > 0.000001) {
-          transfers.push({
-            tokenAddress: info.mint,
-            amount: Math.abs(delta),
-            direction: delta < 0 ? 'out' : 'in',
-            symbol: info.symbol
-          });
-        }
-      });
-      return transfers;
-    } catch {
-      // Ignore & try next RPC
-    }
-  }
-  return [];
-}
-
 async function fetchDexScreenerLiquidity(tokenAddress) {
   if (!tokenAddress) return null;
   try {
@@ -225,13 +137,9 @@ async function fetchDexScreenerLiquidity(tokenAddress) {
   return null;
 }
 
-async function getLiquidityTransfers(chain, txHash, walletAddress) {
+async function getLiquidityTransfers(chain = 'robinhood', txHash, walletAddress) {
   if (!txHash || !walletAddress) return [];
-  if (chain === 'sol') {
-    return getSolanaTransfers(txHash, walletAddress);
-  } else {
-    return getEvmReceiptTransfers(chain, txHash, walletAddress);
-  }
+  return getEvmReceiptTransfers('robinhood', txHash, walletAddress);
 }
 
 module.exports = {
