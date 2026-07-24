@@ -1,6 +1,7 @@
 const config = require('./config');
 const gmgn = require('./gmgn-api');
 const tg = require('./telegram');
+const rpcDecoder = require('./rpc-decoder');
 
 if (!config.GMGN_API_KEY || config.GMGN_API_KEY === 'gmgn_xxx') {
   console.error('ERROR: GMGN_API_KEY not set in .env');
@@ -24,6 +25,25 @@ function findWallet(addr) {
   return wallets.find((w) => w.address === addr);
 }
 
+async function enrichLiquidityEvents(list, wallet) {
+  for (const tx of list) {
+    const eventType = (tx.event_type || '').toLowerCase();
+    if ((eventType === 'add' || eventType === 'remove') && (!tx.token_amount || Number(tx.token_amount) === 0)) {
+      try {
+        const transfers = await rpcDecoder.getLiquidityTransfers(wallet.chain, tx.tx_hash, wallet.address);
+        if (transfers && transfers.length > 0) {
+          tx.decodedTransfers = transfers;
+        } else if (tx.token?.address) {
+          const dsInfo = await rpcDecoder.fetchDexScreenerLiquidity(tx.token.address);
+          if (dsInfo) tx.dexScreenerInfo = dsInfo;
+        }
+      } catch (err) {
+        console.error(`[RPC DECODER] Error decoding tx ${tx.tx_hash}:`, err.message);
+      }
+    }
+  }
+}
+
 async function pollWallet(w) {
   try {
     const activity = await gmgn.getWalletActivity(config.GMGN_API_KEY, w.address, 5, w.chain);
@@ -32,6 +52,8 @@ async function pollWallet(w) {
     const list = activity.activities || activity;
     const latestTxHash = list[0].tx_hash;
     if (!latestTxHash) return;
+
+    await enrichLiquidityEvents(list, w);
 
     const prev = lastTxMap[w.address];
     if (prev === undefined) {

@@ -49,15 +49,79 @@ function formatTx(activity, wallet) {
   const recent = activity.slice(0, 5);
   recent.forEach((tx, i) => {
     const symbol = tx.token?.symbol || tx.token_symbol || 'Unknown';
-    const type = typeLabels[tx.event_type?.toLowerCase()] || `🔄 ${(tx.event_type || '').toUpperCase()}`;
+    const eventType = (tx.event_type || '').toLowerCase();
+    const isLiq = eventType === 'add' || eventType === 'remove';
+    const type = typeLabels[eventType] || `🔄 ${(tx.event_type || '').toUpperCase()}`;
     const shortHash = tx.tx_hash ? ` <code>${tx.tx_hash.slice(0, 6)}</code>` : '';
-    const usd = tx.cost_usd ? `$${Number(tx.cost_usd).toLocaleString()}` : '';
-    const amount = tx.token_amount ? `${Number(tx.token_amount).toFixed(4)}` : '';
+    const usdVal = tx.cost_usd || tx.usd_value || tx.volume_usd;
+    const usd = usdVal ? `$${Number(usdVal).toLocaleString()}` : '';
+    const tokenAmt = tx.token_amount || tx.amount;
+    const amount = tokenAmt && Number(tokenAmt) > 0 ? `${Number(tokenAmt).toFixed(4)}` : '';
     const time = tx.timestamp ? new Date((typeof tx.timestamp === 'number' ? tx.timestamp : parseInt(tx.timestamp)) * 1000).toLocaleString() : '';
 
     lines.push(`${i + 1}. ${type} <b>${symbol}</b>${shortHash}`);
-    if (amount) lines.push(`   Amount: ${amount}`);
+
+    if (!isLiq && amount) {
+      lines.push(`   Amount: ${amount} ${symbol}`);
+    }
     if (usd) lines.push(`   Value: ${usd}`);
+
+    // Detail khusus untuk Add / Remove Liquidity
+    if (isLiq) {
+      const quoteSymbol = tx.quote_token?.symbol || tx.quote_symbol || tx.pair_symbol;
+      const quoteAmt = tx.quote_token_amount || tx.quote_amount;
+      const hasTokenAmt = amount && Number(tokenAmt) > 0;
+      const hasQuoteAmt = quoteAmt && Number(quoteAmt) > 0;
+
+      const actionText = eventType === 'add' ? 'Deposit' : 'Withdraw';
+
+      if (tx.decodedTransfers && tx.decodedTransfers.length > 0) {
+        tx.decodedTransfers.forEach(tr => {
+          let trSymbol = tr.symbol;
+          if (!trSymbol) {
+            const addrLower = (tr.tokenAddress || '').toLowerCase();
+            if (addrLower === tx.token?.address?.toLowerCase()) trSymbol = symbol;
+            else if (addrLower === tx.quote_token?.token_address?.toLowerCase()) trSymbol = quoteSymbol;
+            else trSymbol = shortAddr(tr.tokenAddress);
+          }
+          const displayAmt = tr.amount !== undefined ? tr.amount.toFixed(4) : (tr.rawValue ? tr.rawValue : '');
+          lines.push(`   ${actionText} ${trSymbol}: ${displayAmt}`);
+        });
+      } else if (tx.dexScreenerInfo) {
+        const ds = tx.dexScreenerInfo;
+        if (ds.baseAmount && ds.quoteAmount) {
+          lines.push(`   Pool Liquidity: ${Number(ds.baseAmount).toLocaleString()} ${ds.baseSymbol} + ${Number(ds.quoteAmount).toLocaleString()} ${ds.quoteSymbol}`);
+          if (ds.usdValue) lines.push(`   Pool Value: $${Number(ds.usdValue).toLocaleString()}`);
+        } else if (quoteSymbol) {
+          lines.push(`   Pair: ${symbol}/${quoteSymbol}`);
+        }
+      } else {
+        if (hasTokenAmt) {
+          lines.push(`   ${actionText} ${symbol}: ${amount}`);
+        }
+        if (hasQuoteAmt && quoteSymbol) {
+          lines.push(`   ${actionText} ${quoteSymbol}: ${Number(quoteAmt).toFixed(4)}`);
+        }
+        if (!hasTokenAmt && !hasQuoteAmt && quoteSymbol) {
+          lines.push(`   Pair: ${symbol}/${quoteSymbol}`);
+        }
+      }
+
+      const dex = tx.dex_name || tx.dex || tx.platform || tx.launchpad_platform || tx.launchpad;
+      if (dex) lines.push(`   Platform/DEX: ${dex}`);
+
+      if (tx.gas_usd) lines.push(`   Gas Fee: $${Number(tx.gas_usd).toFixed(4)}`);
+
+      // Range harga untuk Concentrated Liquidity (V3 / CLMM) jika didukung API
+      const minPrice = tx.min_price ?? tx.price_min ?? tx.tick_lower_price;
+      const maxPrice = tx.max_price ?? tx.price_max ?? tx.tick_upper_price;
+      if (minPrice !== undefined && maxPrice !== undefined && minPrice !== null && maxPrice !== null) {
+        lines.push(`   Range: $${Number(minPrice).toFixed(4)} - $${Number(maxPrice).toFixed(4)}`);
+      } else if (tx.range) {
+        lines.push(`   Range: ${tx.range}`);
+      }
+    }
+
     if (time) lines.push(`   ${time}`);
   });
 
