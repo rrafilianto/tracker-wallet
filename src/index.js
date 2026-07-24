@@ -261,6 +261,7 @@ async function handleCommand(msg) {
 }
 
 bot.setMyCommands([
+  { command: 'start', description: 'Start bot & show command menu' },
   { command: 'track', description: 'Track wallet: /track <addr> [chain]' },
   { command: 'untrack', description: 'Stop tracking: /untrack <addr>' },
   { command: 'tag', description: 'Set label: /tag <addr> <name>' },
@@ -270,7 +271,11 @@ bot.setMyCommands([
   { command: 'mypools', description: 'Active Uniswap liquidity pools' },
   { command: 'chains', description: 'Show available chains' },
   { command: 'help', description: 'Show all commands' },
-]).catch(() => {});
+]).then(() => {
+  console.log('📜 [TELEGRAM] Bot command menu updated globally!');
+}).catch((err) => {
+  console.error('⚠️ [TELEGRAM] Error updating command menu:', err.message);
+});
 
 bot.on('message', (msg) => {
   if (msg.text?.startsWith('/')) {
