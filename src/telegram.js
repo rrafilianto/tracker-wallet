@@ -130,11 +130,13 @@ function formatTx(activity, wallet) {
 
       if (tx.gas_usd) lines.push(`   Gas Fee: $${Number(tx.gas_usd).toFixed(4)}`);
 
-      // Range harga untuk Concentrated Liquidity (V3 / CLMM) jika didukung API
+      // Range harga untuk Concentrated Liquidity (V3 / V4 / CLMM) jika didukung
       const minPrice = tx.min_price ?? tx.price_min ?? tx.tick_lower_price;
       const maxPrice = tx.max_price ?? tx.price_max ?? tx.tick_upper_price;
       if (minPrice !== undefined && maxPrice !== undefined && minPrice !== null && maxPrice !== null) {
         lines.push(`   Range: $${Number(minPrice).toFixed(4)} - $${Number(maxPrice).toFixed(4)}`);
+      } else if (tx.decodedRange) {
+        lines.push(`   Range: ${tx.decodedRange}`);
       } else if (tx.range) {
         lines.push(`   Range: ${tx.range}`);
       }

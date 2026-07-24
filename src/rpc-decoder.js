@@ -52,6 +52,12 @@ async function getBlockscoutTransfers(chain, txHash, walletAddress) {
       }
     });
 
+    const jsonStr = JSON.stringify(data.items);
+    const rangeMatch = jsonStr.match(/([\d\.]+)<>([\d\.]+)/);
+    if (rangeMatch) {
+      transfers.range = `$${rangeMatch[1]} - $${rangeMatch[2]}`;
+    }
+
     return transfers;
   } catch {
     return [];

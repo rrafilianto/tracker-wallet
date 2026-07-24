@@ -33,6 +33,7 @@ async function enrichLiquidityEvents(list, wallet) {
         const transfers = await rpcDecoder.getLiquidityTransfers(wallet.chain, tx.tx_hash, wallet.address);
         if (transfers && transfers.length > 0) {
           tx.decodedTransfers = transfers;
+          if (transfers.range) tx.decodedRange = transfers.range;
         } else if (tx.token?.address) {
           const dsInfo = await rpcDecoder.fetchDexScreenerLiquidity(tx.token.address);
           if (dsInfo) tx.dexScreenerInfo = dsInfo;
