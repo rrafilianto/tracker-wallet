@@ -7,6 +7,26 @@ const RPC_ENDPOINTS = {
   sol: ['https://api.mainnet-beta.solana.com', 'https://solana-rpc.publicnode.com']
 };
 
+function getChainRpcs(chain) {
+  const alchemyKey = process.env.ALCHEMY_API_KEY;
+  const alchemyUrl = process.env.ALCHEMY_RPC_URL;
+  const list = [];
+
+  if (alchemyUrl) list.push(alchemyUrl);
+  if (alchemyKey && alchemyKey !== 'your_alchemy_api_key_here') {
+    const alchemyMap = {
+      robinhood: `https://robinhood-mainnet.g.alchemy.com/v2/${alchemyKey}`,
+      eth: `https://eth-mainnet.g.alchemy.com/v2/${alchemyKey}`,
+      base: `https://base-mainnet.g.alchemy.com/v2/${alchemyKey}`,
+      bsc: `https://bnb-mainnet.g.alchemy.com/v2/${alchemyKey}`,
+    };
+    if (alchemyMap[chain]) list.push(alchemyMap[chain]);
+  }
+
+  const defaults = RPC_ENDPOINTS[chain] || RPC_ENDPOINTS.eth || [];
+  return [...list, ...defaults];
+}
+
 const BLOCKSCOUT_APIS = {
   robinhood: 'https://robinhoodchain.blockscout.com/api/v2/transactions'
 };
@@ -70,7 +90,7 @@ async function getEvmReceiptTransfers(chain, txHash, walletAddress) {
     if (bsTransfers.length > 0) return bsTransfers;
   }
 
-  const rpcs = RPC_ENDPOINTS[chain] || RPC_ENDPOINTS.eth;
+  const rpcs = getChainRpcs(chain);
   const paddedWallet = padAddress(walletAddress);
 
   for (const rpcUrl of rpcs) {

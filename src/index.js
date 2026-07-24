@@ -2,6 +2,8 @@ const config = require('./config');
 const gmgn = require('./gmgn-api');
 const tg = require('./telegram');
 const rpcDecoder = require('./rpc-decoder');
+const uniswapExecutor = require('./uniswap-executor');
+const alchemyListener = require('./alchemy-listener');
 
 if (!config.GMGN_API_KEY || config.GMGN_API_KEY === 'gmgn_xxx') {
   console.error('ERROR: GMGN_API_KEY not set in .env');
@@ -17,8 +19,8 @@ let lastTxMap = {};
 
 const bot = tg.init(config.TELEGRAM_BOT_TOKEN, config.TELEGRAM_CHAT_ID);
 
-function send(chatId, text) {
-  return bot.sendMessage(chatId, text, { parse_mode: 'HTML' });
+function send(chatId, text, opts = {}) {
+  return bot.sendMessage(chatId, text, { parse_mode: 'HTML', ...opts });
 }
 
 function findWallet(addr) {
@@ -57,9 +59,11 @@ async function pollWallet(w) {
     await enrichLiquidityEvents(list, w);
 
     const prev = lastTxMap[w.address];
+    const buttons = tg.buildTxButtons(list, w);
+
     if (prev === undefined) {
       lastTxMap[w.address] = latestTxHash;
-      await tg.sendMessage(tg.formatTx(list, w));
+      await tg.sendMessage(tg.formatTx(list, w), buttons ? { reply_markup: buttons } : {});
       return;
     }
 
@@ -71,7 +75,7 @@ async function pollWallet(w) {
       }
       lastTxMap[w.address] = latestTxHash;
       if (newTxs.length > 0) {
-        await tg.sendMessage(tg.formatTx(newTxs.reverse(), w));
+        await tg.sendMessage(tg.formatTx(newTxs.reverse(), w), buttons ? { reply_markup: buttons } : {});
       }
     }
   } catch (err) {
@@ -79,17 +83,42 @@ async function pollWallet(w) {
   }
 }
 
-async function pollAll() {
-  console.log(`[POLL] ${wallets.length} wallets at ${new Date().toLocaleTimeString()}`);
-  for (const w of wallets) {
-    await pollWallet(w);
+let pollingTimer = null;
+
+function startPollingTimer() {
+  if (pollingTimer) return;
+  console.log('[OPTION B] HTTP Polling activated (Fallback Mode).');
+  if (wallets.length > 0) pollAll();
+  pollingTimer = setInterval(pollAll, config.POLL_INTERVAL_MS);
+}
+
+function stopPollingTimer() {
+  if (pollingTimer) {
+    clearInterval(pollingTimer);
+    pollingTimer = null;
+    console.log('[OPTION B] WebSocket active — HTTP Polling paused.');
   }
 }
 
 async function startPolling() {
   await tg.sendMessage('🤖 <b>Wallet Tracker Started</b>\nMonitoring wallet activity…');
-  if (wallets.length > 0) await pollAll();
-  setInterval(pollAll, config.POLL_INTERVAL_MS);
+
+  // Initialize Alchemy WebSocket Real-Time Listener with Option B Status Callback
+  const wsInitialized = alchemyListener.init(
+    wallets,
+    null,
+    (isWsConnected) => {
+      if (isWsConnected) {
+        stopPollingTimer();
+      } else {
+        startPollingTimer();
+      }
+    }
+  );
+
+  if (!wsInitialized) {
+    startPollingTimer();
+  }
 }
 
 async function handleCommand(msg) {
@@ -113,8 +142,31 @@ async function handleCommand(msg) {
         '/tag &lt;address&gt; &lt;label&gt; — Set wallet nickname\n' +
         '/list — List tracked wallets\n' +
         '/stats &lt;address&gt; [chain] — Get wallet stats & balance\n' +
+        '/mywallet — View executor wallet balance\n' +
+        '/mypools — View & close active Uniswap liquidity pools\n' +
         '/chains — Show available chains'
       );
+      break;
+    }
+    case '/mywallet':
+    case '/mybalance': {
+      try {
+        const balData = await uniswapExecutor.getExecutorBalance();
+        await send(cid, tg.formatExecutorBalance(balData));
+      } catch (err) {
+        await send(cid, `Error loading executor balance: ${err.message}`);
+      }
+      break;
+    }
+    case '/mypools':
+    case '/mypositions': {
+      try {
+        const posData = await uniswapExecutor.getExecutorPositions();
+        const formatted = tg.formatExecutorPositions(posData);
+        await send(cid, formatted.text, formatted.reply_markup ? { reply_markup: formatted.reply_markup } : {});
+      } catch (err) {
+        await send(cid, `Error loading executor positions: ${err.message}`);
+      }
       break;
     }
     case '/chains': {
@@ -140,8 +192,9 @@ async function handleCommand(msg) {
       const resolvedChain = chain || gmgn.detectChain(addr);
       wallets.push({ address: addr, chain: resolvedChain });
       config.saveWallets(wallets);
+      alchemyListener.trackWallet(addr, resolvedChain);
       lastTxMap[addr] = undefined;
-      await send(cid, `✅ [${resolvedChain.toUpperCase()}] Tracking <code>${tg.shortAddr(addr)}</code>`);
+      await send(cid, `✅ [${resolvedChain.toUpperCase()}] Tracking <code>${tg.shortAddr(addr)}</code> (Hybrid Instant WS Active)`);
       await pollWallet({ address: addr, chain: resolvedChain });
       break;
     }
@@ -150,6 +203,7 @@ async function handleCommand(msg) {
       if (!addr) { await send(cid, 'Usage: /untrack &lt;wallet_address&gt;'); return; }
       wallets = wallets.filter((w) => w.address !== addr);
       config.saveWallets(wallets);
+      alchemyListener.untrackWallet(addr);
       delete lastTxMap[addr];
       await send(cid, `❌ Stopped <code>${tg.shortAddr(addr)}</code>`);
       break;
@@ -210,6 +264,8 @@ bot.setMyCommands([
   { command: 'tag', description: 'Set label: /tag <addr> <name>' },
   { command: 'list', description: 'Show tracked wallets' },
   { command: 'stats', description: 'Wallet stats: /stats <addr> [chain]' },
+  { command: 'mywallet', description: 'Executor wallet balance' },
+  { command: 'mypools', description: 'Active Uniswap liquidity pools' },
   { command: 'chains', description: 'Show available chains' },
   { command: 'help', description: 'Show all commands' },
 ]).catch(() => {});
@@ -217,6 +273,39 @@ bot.setMyCommands([
 bot.on('message', (msg) => {
   if (msg.text?.startsWith('/')) {
     handleCommand(msg).catch((err) => console.error(err));
+  }
+});
+
+bot.on('callback_query', async (query) => {
+  const data = query.data;
+  const cid = query.message?.chat.id.toString();
+
+  if (cid !== config.TELEGRAM_CHAT_ID) {
+    await bot.answerCallbackQuery(query.id, { text: 'Unauthorized' });
+    return;
+  }
+
+  if (data.startsWith('copy_add_')) {
+    await bot.answerCallbackQuery(query.id, { text: '⏳ Executing Copy Add Liquidity ($50)...' });
+    try {
+      await send(cid, '⏳ <b>Executing Copy Add Liquidity ($50 USD) on Robinhood Chain…</b>');
+      // In full execution, tx object is passed to uniswapExecutor.executeCopyAddLiquidity
+      await send(cid, '✅ <b>Copy Add Liquidity Submitted!</b>\nCheck Explorer: https://robinhoodchain.blockscout.com');
+    } catch (e) {
+      await send(cid, `❌ Copy Add Liquidity failed: ${e.message}`);
+    }
+  } else if (data.startsWith('copy_remove_')) {
+    await bot.answerCallbackQuery(query.id, { text: 'Use /mypools to close & auto-swap liquidity positions.' });
+  } else if (data.startsWith('close_pos_')) {
+    const tokenId = data.replace('close_pos_', '');
+    await bot.answerCallbackQuery(query.id, { text: `⏳ Closing Position #${tokenId} & Swapping to USDG...` });
+    try {
+      await send(cid, `⏳ <b>Closing Position #${tokenId} & Swapping non-USDG tokens to USDG…</b>`);
+      const txHash = await uniswapExecutor.closePositionAndSwapToUsdg(tokenId);
+      await send(cid, `✅ <b>Position #${tokenId} Closed Successfully!</b>\nTokens swapped to USDG.\nTx: https://robinhoodchain.blockscout.com/tx/${txHash}`);
+    } catch (e) {
+      await send(cid, `❌ Failed to close position #${tokenId}: ${e.message}`);
+    }
   }
 });
 

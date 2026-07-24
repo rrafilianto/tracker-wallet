@@ -41,7 +41,9 @@ function formatWibTime(ts) {
     hour12: false,
   }).formatToParts(date);
   const p = {};
-  parts.forEach((item) => { p[item.type] = item.value; });
+  parts.forEach((item) => {
+    p[item.type] = item.value;
+  });
   return `${p.day}/${p.month}/${p.year}, ${p.hour}:${p.minute}:${p.second} WIB`;
 }
 
@@ -69,12 +71,16 @@ function formatTx(activity, wallet) {
     const symbol = tx.token?.symbol || tx.token_symbol || 'Unknown';
     const eventType = (tx.event_type || '').toLowerCase();
     const isLiq = eventType === 'add' || eventType === 'remove';
-    const type = typeLabels[eventType] || `🔄 ${(tx.event_type || '').toUpperCase()}`;
-    const shortHash = tx.tx_hash ? ` <code>${tx.tx_hash.slice(0, 6)}</code>` : '';
+    const type =
+      typeLabels[eventType] || `🔄 ${(tx.event_type || '').toUpperCase()}`;
+    const shortHash = tx.tx_hash
+      ? ` <code>${tx.tx_hash.slice(0, 6)}</code>`
+      : '';
     const usdVal = tx.cost_usd || tx.usd_value || tx.volume_usd;
     const usd = usdVal ? `$${Number(usdVal).toLocaleString()}` : '';
     const tokenAmt = tx.token_amount || tx.amount;
-    const amount = tokenAmt && Number(tokenAmt) > 0 ? `${Number(tokenAmt).toFixed(4)}` : '';
+    const amount =
+      tokenAmt && Number(tokenAmt) > 0 ? `${Number(tokenAmt).toFixed(4)}` : '';
     const time = formatWibTime(tx.timestamp);
 
     lines.push(`${i + 1}. ${type} <b>${symbol}</b>${shortHash}`);
@@ -86,7 +92,8 @@ function formatTx(activity, wallet) {
 
     // Detail khusus untuk Add / Remove Liquidity
     if (isLiq) {
-      const quoteSymbol = tx.quote_token?.symbol || tx.quote_symbol || tx.pair_symbol;
+      const quoteSymbol =
+        tx.quote_token?.symbol || tx.quote_symbol || tx.pair_symbol;
       const quoteAmt = tx.quote_token_amount || tx.quote_amount;
       const hasTokenAmt = amount && Number(tokenAmt) > 0;
       const hasQuoteAmt = quoteAmt && Number(quoteAmt) > 0;
@@ -94,22 +101,36 @@ function formatTx(activity, wallet) {
       const actionText = eventType === 'add' ? 'Deposit' : 'Withdraw';
 
       if (tx.decodedTransfers && tx.decodedTransfers.length > 0) {
-        tx.decodedTransfers.forEach(tr => {
+        tx.decodedTransfers.forEach((tr) => {
           let trSymbol = tr.symbol;
           if (!trSymbol) {
             const addrLower = (tr.tokenAddress || '').toLowerCase();
-            if (addrLower === tx.token?.address?.toLowerCase()) trSymbol = symbol;
-            else if (addrLower === tx.quote_token?.token_address?.toLowerCase()) trSymbol = quoteSymbol;
+            if (addrLower === tx.token?.address?.toLowerCase())
+              trSymbol = symbol;
+            else if (addrLower === tx.quote_token?.token_address?.toLowerCase())
+              trSymbol = quoteSymbol;
             else trSymbol = shortAddr(tr.tokenAddress);
           }
-          const displayAmt = tr.amount !== undefined ? tr.amount.toFixed(4) : (tr.rawValue ? tr.rawValue : '');
+          const displayAmt =
+            tr.amount !== undefined
+              ? tr.amount >= 1000
+                ? formatCompactNumber(tr.amount)
+                : tr.amount.toFixed(4)
+              : tr.rawValue
+                ? formatCompactNumber(tr.rawValue)
+                : '';
           lines.push(`   ${actionText} ${trSymbol}: ${displayAmt}`);
         });
       } else if (tx.dexScreenerInfo) {
         const ds = tx.dexScreenerInfo;
         if (ds.baseAmount && ds.quoteAmount) {
-          lines.push(`   Pool Liquidity: ${Number(ds.baseAmount).toLocaleString()} ${ds.baseSymbol} + ${Number(ds.quoteAmount).toLocaleString()} ${ds.quoteSymbol}`);
-          if (ds.usdValue) lines.push(`   Pool Value: $${Number(ds.usdValue).toLocaleString()}`);
+          lines.push(
+            `   Pool Liquidity: ${Number(ds.baseAmount).toLocaleString()} ${ds.baseSymbol} + ${Number(ds.quoteAmount).toLocaleString()} ${ds.quoteSymbol}`,
+          );
+          if (ds.usdValue)
+            lines.push(
+              `   Pool Value: $${Number(ds.usdValue).toLocaleString()}`,
+            );
         } else if (quoteSymbol) {
           lines.push(`   Pair: ${symbol}/${quoteSymbol}`);
         }
@@ -118,23 +139,38 @@ function formatTx(activity, wallet) {
           lines.push(`   ${actionText} ${symbol}: ${amount}`);
         }
         if (hasQuoteAmt && quoteSymbol) {
-          lines.push(`   ${actionText} ${quoteSymbol}: ${Number(quoteAmt).toFixed(4)}`);
+          lines.push(
+            `   ${actionText} ${quoteSymbol}: ${Number(quoteAmt).toFixed(4)}`,
+          );
         }
         if (!hasTokenAmt && !hasQuoteAmt && quoteSymbol) {
           lines.push(`   Pair: ${symbol}/${quoteSymbol}`);
         }
       }
 
-      const dex = tx.dex_name || tx.dex || tx.platform || tx.launchpad_platform || tx.launchpad;
+      const dex =
+        tx.dex_name ||
+        tx.dex ||
+        tx.platform ||
+        tx.launchpad_platform ||
+        tx.launchpad;
       if (dex) lines.push(`   Platform/DEX: ${dex}`);
 
-      if (tx.gas_usd) lines.push(`   Gas Fee: $${Number(tx.gas_usd).toFixed(4)}`);
+      if (tx.gas_usd)
+        lines.push(`   Gas Fee: $${Number(tx.gas_usd).toFixed(4)}`);
 
       // Range harga untuk Concentrated Liquidity (V3 / V4 / CLMM) jika didukung
       const minPrice = tx.min_price ?? tx.price_min ?? tx.tick_lower_price;
       const maxPrice = tx.max_price ?? tx.price_max ?? tx.tick_upper_price;
-      if (minPrice !== undefined && maxPrice !== undefined && minPrice !== null && maxPrice !== null) {
-        lines.push(`   Range: $${Number(minPrice).toFixed(4)} - $${Number(maxPrice).toFixed(4)}`);
+      if (
+        minPrice !== undefined &&
+        maxPrice !== undefined &&
+        minPrice !== null &&
+        maxPrice !== null
+      ) {
+        lines.push(
+          `   Range: $${Number(minPrice).toFixed(4)} - $${Number(maxPrice).toFixed(4)}`,
+        );
       } else if (tx.decodedRange) {
         lines.push(`   Range: ${tx.decodedRange}`);
       } else if (tx.range) {
@@ -157,12 +193,16 @@ function formatStats(stats, address, chain) {
     lines.push(`Balance: <b>${bal.toFixed(4)} ${symbol}</b>`);
   }
   if (stats.realized_profit !== undefined)
-    lines.push(`PnL: <b>${stats.realized_profit >= 0 ? '+' : ''}$${Number(stats.realized_profit).toLocaleString()}</b>`);
+    lines.push(
+      `PnL: <b>${stats.realized_profit >= 0 ? '+' : ''}$${Number(stats.realized_profit).toLocaleString()}</b>`,
+    );
   const winrate = stats.pnl_stat?.winrate;
   if (winrate !== undefined)
     lines.push(`Win Rate: <b>${(winrate * 100).toFixed(1)}%</b>`);
   if (stats.total_cost !== undefined)
-    lines.push(`Total Spent: <b>$${Number(stats.total_cost).toLocaleString()}</b>`);
+    lines.push(
+      `Total Spent: <b>$${Number(stats.total_cost).toLocaleString()}</b>`,
+    );
   const buys = stats.buy || 0;
   const sells = stats.sell || 0;
   if (buys > 0 || sells > 0)
@@ -182,12 +222,115 @@ function formatHoldings(holdings) {
   if (!holdings?.list?.length) return 'No holdings (requires private key).';
   const lines = ['💼 <b>Holdings</b>'];
   holdings.list.slice(0, 10).forEach((h) => {
-    const sym = h.token?.symbol || h.token_symbol || h.token_address?.slice(0, 6) || 'Unknown';
+    const sym =
+      h.token?.symbol ||
+      h.token_symbol ||
+      h.token_address?.slice(0, 6) ||
+      'Unknown';
     const usd = h.usd_value ? `$${Number(h.usd_value).toLocaleString()}` : '';
-    const pnl = h.total_profit ? ` ${h.total_profit >= 0 ? '+' : ''}$${Number(h.total_profit).toLocaleString()}` : '';
+    const pnl = h.total_profit
+      ? ` ${h.total_profit >= 0 ? '+' : ''}$${Number(h.total_profit).toLocaleString()}`
+      : '';
     lines.push(`• ${sym}: ${usd}${pnl}`);
   });
   return lines.join('\n');
+}
+
+function formatExecutorBalance(bal) {
+  if (!bal || !bal.address) return 'Executor wallet not configured.';
+  const lines = [
+    '💼 <b>Executor Wallet Balance</b> (Robinhood Chain)',
+    `Address: <code>${bal.address}</code>`,
+    `• <b>ETH</b>: ${Number(bal.ethBalance).toFixed(4)} ETH`,
+  ];
+  if (bal.tokens && bal.tokens.length > 0) {
+    bal.tokens.forEach((t) => {
+      lines.push(`• <b>${t.symbol}</b>: ${Number(t.balance).toLocaleString()}`);
+    });
+  } else {
+    lines.push('• No ERC-20 token balances found.');
+  }
+  return lines.join('\n');
+}
+
+function formatCompactNumber(val) {
+  if (val === undefined || val === null || val === '') return '0';
+  const num = typeof val === 'number' ? val : Number(val);
+  if (isNaN(num) || num === 0) return '0';
+
+  const abs = Math.abs(num);
+  if (abs >= 1e15) return (num / 1e15).toFixed(2).replace(/\.00$/, '') + 'Q';
+  if (abs >= 1e12) return (num / 1e12).toFixed(2).replace(/\.00$/, '') + 'T';
+  if (abs >= 1e9) return (num / 1e9).toFixed(2).replace(/\.00$/, '') + 'B';
+  if (abs >= 1e6) return (num / 1e6).toFixed(2).replace(/\.00$/, '') + 'M';
+  if (abs >= 1e3) return (num / 1e3).toFixed(2).replace(/\.00$/, '') + 'K';
+  return num.toFixed(2).replace(/\.00$/, '');
+}
+
+function formatExecutorPositions(positions) {
+  if (!positions || positions.length === 0) {
+    return {
+      text: '🏊 <b>Active Positions</b> (Uniswap V3 / V4)\nNo active liquidity positions found on Robinhood Chain.',
+      reply_markup: undefined,
+    };
+  }
+
+  const lines = [`🏊 <b>Active Liquidity Positions (${positions.length})</b>`];
+  const keyboard = [];
+
+  positions.forEach((pos, i) => {
+    const pair = pos.symbol1 ? `${pos.symbol0}/${pos.symbol1}` : pos.symbol0;
+    const versionTag = pos.isV4 !== false ? 'V4' : 'V3';
+    const liqStr = pos.liquidity; // Raw on-chain liquidity number
+    const rangeStr = pos.tickUpper ? `${pos.tickLower} <> ${pos.tickUpper}` : pos.tickLower;
+    const ageStr = pos.ageStr || '-';
+
+    lines.push(
+      `\n${i + 1}. <b>${pair}</b> (${pos.fee}% ${versionTag}) - Position #${pos.tokenId}` +
+        `\n   Liquidity: <b>${liqStr}</b>` +
+        `\n   Age: <b>${ageStr}</b>` +
+        `\n   Price Range: <b>${rangeStr}</b>`,
+    );
+
+    keyboard.push([
+      {
+        text: `❌ Close #${pos.tokenId} (${pair} → USDG)`,
+        callback_data: `close_pos_${pos.tokenId}`,
+      },
+    ]);
+  });
+
+  return {
+    text: lines.join('\n'),
+    reply_markup: { inline_keyboard: keyboard },
+  };
+}
+
+function buildTxButtons(activity, wallet) {
+  if (wallet.chain !== 'robinhood' || !activity?.length) return undefined;
+
+  const keyboard = [];
+  activity.slice(0, 3).forEach((tx) => {
+    const eventType = (tx.event_type || '').toLowerCase();
+    const symbol = tx.token?.symbol || tx.token_symbol || 'TOKEN';
+    if (eventType === 'add') {
+      keyboard.push([
+        {
+          text: `📥 Copy Add Liq ($50) — ${symbol}`,
+          callback_data: `copy_add_${tx.tx_hash.slice(0, 10)}`,
+        },
+      ]);
+    } else if (eventType === 'remove') {
+      keyboard.push([
+        {
+          text: `📤 Copy Remove Liq — ${symbol}`,
+          callback_data: `copy_remove_${tx.tx_hash.slice(0, 10)}`,
+        },
+      ]);
+    }
+  });
+
+  return keyboard.length > 0 ? { inline_keyboard: keyboard } : undefined;
 }
 
 module.exports = {
@@ -196,6 +339,9 @@ module.exports = {
   formatTx,
   formatStats,
   formatHoldings,
+  formatExecutorBalance,
+  formatExecutorPositions,
+  buildTxButtons,
   shortAddr,
   displayName,
 };
