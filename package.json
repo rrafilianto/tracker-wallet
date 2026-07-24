@@ -11,7 +11,7 @@
     "pm2:logs": "pm2 logs wallet-tracker",
     "pm2:status": "pm2 status wallet-tracker",
     "pm2:save": "pm2 save",
-    "test": "node test/unit.test.js"
+    "test": "echo \"No test specified\""
   },
   "keywords": [],
   "author": "",

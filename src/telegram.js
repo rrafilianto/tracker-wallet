@@ -81,13 +81,22 @@ function formatTx(activity, wallet) {
     const usd = usdVal ? `$${Number(usdVal).toLocaleString()}` : '';
     const tokenAmt = tx.token_amount || tx.amount;
     const amount =
-      tokenAmt && Number(tokenAmt) > 0 ? `${Number(tokenAmt).toFixed(4)}` : '';
+      tokenAmt && Number(tokenAmt) > 0
+        ? Number(tokenAmt) >= 1000
+          ? formatCompactNumber(tokenAmt)
+          : `${Number(tokenAmt).toFixed(4)}`
+        : '';
     const time = formatWibTime(tx.timestamp);
 
     lines.push(`${i + 1}. ${type} <b>${symbol}</b>${shortHash}`);
 
     if (!isLiq && amount) {
       lines.push(`   Amount: ${amount} ${symbol}`);
+    }
+    if (eventType === 'buy' && tx.quote_token_amount && tx.quote_token?.symbol) {
+      lines.push(`   Spent: ${formatCompactNumber(tx.quote_token_amount)} ${tx.quote_token.symbol}`);
+    } else if (eventType === 'sell' && tx.quote_token_amount && tx.quote_token?.symbol) {
+      lines.push(`   Received: ${formatCompactNumber(tx.quote_token_amount)} ${tx.quote_token.symbol}`);
     }
     if (usd) lines.push(`   Value: ${usd}`);
 

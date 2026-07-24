@@ -91,14 +91,17 @@ async function handleDetectedTransaction(tx, wallet) {
   try {
     const txHash = tx.hash;
     const transfers = await rpcDecoder.getLiquidityTransfers(wallet.chain, txHash, wallet.address);
+    const classification = rpcDecoder.analyzeAndClassifyTx(transfers, wallet.address, tx);
 
     const activityItem = {
       tx_hash: txHash,
       timestamp: Math.floor(Date.now() / 1000),
-      event_type: transfers.length > 0 ? 'add' : 'transfer',
-      token_amount: '0',
-      token: { symbol: 'TOKEN', address: tx.to },
-      quote_token: { symbol: 'USDG', token_address: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168' },
+      event_type: classification.event_type,
+      token_amount: classification.token_amount,
+      quote_token_amount: classification.quote_amount,
+      cost_usd: classification.cost_usd,
+      token: classification.token,
+      quote_token: classification.quote_token,
       decodedTransfers: transfers,
       decodedRange: transfers.range || null
     };
@@ -131,9 +134,23 @@ function isWsConnected() {
   return isConnected;
 }
 
+function closeWs() {
+  if (provider) {
+    try {
+      provider.destroy();
+    } catch {
+      // Ignore destroy error
+    }
+    provider = null;
+  }
+  isConnected = false;
+  console.log('[ALCHEMY WS] WebSocket listener explicitly stopped.');
+}
+
 module.exports = {
   init,
   trackWallet,
   untrackWallet,
   isWsConnected,
+  closeWs,
 };
