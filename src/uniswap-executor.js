@@ -874,16 +874,33 @@ async function executeAutoDeployLp(tokenAddress, amountUsd = 50, preFoundPool = 
     throw new Error(`Insufficient USDG balance: have ${ethers.formatUnits(usdgBalance, 6)}, need ${amountUsd}`);
   }
 
-  // One-side lower tick range: tickLower = price is (rangePct)% below current price
-  // Formula: tickDiff = floor( log(1 - rangePct/100) / log(1.0001) / tickSpacing ) * tickSpacing
+  // One-side lower LP tick range:
+  // We want USDG liquidity that buys TOKEN as TOKEN price drops from priceNow down to priceNow * (1 - rangePct/100).
+  // Note: If isC0Usdg is true (currency0=USDG, currency1=TOKEN), tokenPrice = 10^(dec1-6) / 1.0001^tick.
+  //       Therefore, a LOWER TOKEN price corresponds to a HIGHER tick!
+  //       If isC0Usdg is false (currency0=TOKEN, currency1=USDG), tokenPrice = 1.0001^tick * 10^(dec0-6).
+  //       Therefore, a LOWER TOKEN price corresponds to a LOWER tick!
   const alignDown = (t, ts) => Math.floor(t / ts) * ts;
   const minTickAligned = Math.ceil(MIN_TICK / tickSpacing) * tickSpacing;
   const maxTickAligned = Math.floor(MAX_TICK / tickSpacing) * tickSpacing;
-  let tickUpper = alignDown(tick, tickSpacing);
+
   const ratio = 1 - rangePct / 100;
-  const rawTickDiff = Math.log(ratio) / Math.log(1.0001); // negative number
-  const alignedTickDiff = Math.floor(rawTickDiff / tickSpacing) * tickSpacing;
-  let tickLower = tickUpper + alignedTickDiff;
+  const rawTickDiff = Math.log(ratio) / Math.log(1.0001); // negative number (~ -6931 for 50%)
+  const tickDiffAbs = Math.floor(Math.abs(rawTickDiff) / tickSpacing) * tickSpacing;
+
+  let tickLower, tickUpper;
+  if (isC0Usdg) {
+    // currency0 is USDG: TOKEN price drops -> tick increases.
+    // Range is [tickCurrent, tickCurrent + tickDiffAbs]
+    tickLower = alignDown(tick, tickSpacing);
+    tickUpper = tickLower + tickDiffAbs;
+  } else {
+    // currency1 is USDG: TOKEN price drops -> tick decreases.
+    // Range is [tickCurrent - tickDiffAbs, tickCurrent]
+    tickUpper = alignDown(tick, tickSpacing);
+    tickLower = tickUpper - tickDiffAbs;
+  }
+
   tickLower = Math.max(tickLower, minTickAligned);
   tickUpper = Math.min(tickUpper, maxTickAligned);
   if (tickLower >= tickUpper) {

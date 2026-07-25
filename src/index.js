@@ -184,7 +184,7 @@ async function handleCommand(msg) {
     case '/mypositions': {
       try {
         const posData = await uniswapExecutor.getExecutorPositions();
-        const formatted = tg.formatExecutorPositions(posData);
+        const formatted = tg.formatExecutorPositions(posData, tg.formatWibTimeShort());
         await send(cid, formatted.text, formatted.reply_markup ? { reply_markup: formatted.reply_markup } : {});
       } catch (err) {
         await send(cid, `Error loading executor positions: ${err.message}`);
@@ -305,18 +305,21 @@ bot.on('message', (msg) => {
 });
 
 function formatTvl(tvlUsd) {
+  if (tvlUsd === undefined || tvlUsd === null || isNaN(tvlUsd)) return 'N/A';
   if (tvlUsd >= 1_000_000) return `$${(tvlUsd / 1_000_000).toFixed(2)}M`;
   if (tvlUsd >= 1_000) return `$${(tvlUsd / 1_000).toFixed(1)}K`;
-  if (tvlUsd > 0) return `$${tvlUsd.toFixed(0)}`;
-  return 'N/A';
+  if (tvlUsd > 0) return `$${tvlUsd.toFixed(2)}`;
+  return '$0';
 }
 
 // Format harga kecil ke notasi compact: 0.0₆641 (seperti di Uniswap UI)
 const SUBSCRIPT_DIGITS = '₀₁₂₃₄₅₆₇₈₉';
 function formatPriceCompact(price) {
   if (!price || !isFinite(price) || price <= 0) return '0';
-  if (price >= 1) return price.toPrecision(4);
-  if (price >= 0.01) return price.toPrecision(3);
+  if (price >= 1e12) return 'N/A';
+  if (price >= 1000) return price.toLocaleString('en-US', { maximumFractionDigits: 2 });
+  if (price >= 1) return price.toFixed(4);
+  if (price >= 0.01) return price.toFixed(4);
 
   const str = price.toFixed(20);
   const afterDecimal = str.split('.')[1] || '';
@@ -354,13 +357,25 @@ function buildDeployConfirmation(poolInfo, shortKey, idx, settings, updatedAt = 
   // Hitung tick range
   const tickSpacing = Number(pk.tickSpacing);
   const alignDown   = (t, ts) => Math.floor(t / ts) * ts;
-  const tickUpper   = alignDown(tick, tickSpacing);
+  
   const ratio       = 1 - rangePct / 100;
   const rawTickDiff = Math.log(ratio) / Math.log(1.0001);
-  const tickLower   = tickUpper + Math.floor(rawTickDiff / tickSpacing) * tickSpacing;
+  const tickDiffAbs = Math.floor(Math.abs(rawTickDiff) / tickSpacing) * tickSpacing;
 
-  const priceLower  = tickToTokenPrice(tickLower, dec0, dec1, isC0Usdg);
-  const priceUpper  = tickToTokenPrice(tickUpper, dec0, dec1, isC0Usdg);
+  let tickLower, tickUpper;
+  if (isC0Usdg) {
+    tickLower = alignDown(tick, tickSpacing);
+    tickUpper = tickLower + tickDiffAbs;
+  } else {
+    tickUpper = alignDown(tick, tickSpacing);
+    tickLower = tickUpper - tickDiffAbs;
+  }
+
+  const priceAtLower = tickToTokenPrice(tickLower, dec0, dec1, isC0Usdg);
+  const priceAtUpper = tickToTokenPrice(tickUpper, dec0, dec1, isC0Usdg);
+
+  const priceMin = Math.min(priceAtLower, priceAtUpper);
+  const priceMax = Math.max(priceAtLower, priceAtUpper);
 
   const sqrtP    = Number(poolInfo.sqrtPriceX96) / Math.pow(2, 96);
   const rawNow   = sqrtP * sqrtP;
@@ -368,7 +383,10 @@ function buildDeployConfirmation(poolInfo, shortKey, idx, settings, updatedAt = 
     ? Math.pow(10, dec1 - 6) / rawNow
     : rawNow * Math.pow(10, dec0 - 6);
 
-  const rangeStr = `${formatPriceCompact(priceLower)}–${formatPriceCompact(priceUpper)} (now ${formatPriceCompact(priceNow)})`;
+  const isInvalidPrice = priceMin >= 1e12 || priceMax >= 1e12 || priceNow >= 1e12;
+  const rangeStr = isInvalidPrice
+    ? 'N/A (Empty / Uninitialized Pool)'
+    : `${formatPriceCompact(priceMin)}–${formatPriceCompact(priceMax)} (now ${formatPriceCompact(priceNow)})`;
 
   let text =
     `📋 <b>Konfirmasi Deploy LP</b>\n\n` +
@@ -546,9 +564,7 @@ bot.on('callback_query', async (query) => {
     await bot.answerCallbackQuery(query.id, { text: '🔄 Fetching latest positions data...' });
     try {
       const posData = await uniswapExecutor.getExecutorPositions();
-      const now = new Date().toLocaleTimeString('id-ID', {
-        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-      });
+      const now = tg.formatWibTimeShort();
       const formatted = tg.formatExecutorPositions(posData, now);
       await bot.editMessageText(formatted.text, {
         chat_id: cid,
@@ -608,9 +624,7 @@ bot.on('callback_query', async (query) => {
       poolInfo.sqrtPriceX96 = fresh.sqrtPriceX96;
       poolInfo.tick          = fresh.tick;
 
-      const now = new Date().toLocaleTimeString('id-ID', {
-        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-      });
+      const now = tg.formatWibTimeShort();
 
       const { text, keyboard } = buildDeployConfirmation(poolInfo, shortKey, idx, deploySettings, now);
       await bot.editMessageText(text, {

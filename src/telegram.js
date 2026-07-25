@@ -48,6 +48,21 @@ function formatWibTime(ts) {
   return `${p.day}/${p.month}/${p.year}, ${p.hour}:${p.minute}:${p.second} WIB`;
 }
 
+function formatWibTimeShort(dateObj = new Date()) {
+  const parts = new Intl.DateTimeFormat('id-ID', {
+    timeZone: 'Asia/Jakarta',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).formatToParts(dateObj);
+  const p = {};
+  parts.forEach((item) => {
+    p[item.type] = item.value;
+  });
+  return `${p.hour}:${p.minute}:${p.second} WIB`;
+}
+
 function formatTx(activity, wallet) {
   const name = wallet.label || shortAddr(wallet.address);
   const lines = [`🔔 <b>[${chainLabel(wallet.chain)}] ${name}</b>`];
@@ -280,8 +295,10 @@ function formatCompactNumber(val) {
 const SUBSCRIPT_DIGITS = '₀₁₂₃₄₅₆₇₈₉';
 function formatPriceCompact(price) {
   if (!price || !isFinite(price) || price <= 0) return '0';
-  if (price >= 1) return price.toPrecision(4);
-  if (price >= 0.01) return price.toPrecision(3);
+  if (price >= 1e12) return 'N/A';
+  if (price >= 1000) return price.toLocaleString('en-US', { maximumFractionDigits: 2 });
+  if (price >= 1) return price.toFixed(4);
+  if (price >= 0.01) return price.toFixed(4);
 
   const str = price.toFixed(20);
   const afterDecimal = str.split('.')[1] || '';
@@ -461,4 +478,5 @@ module.exports = {
   buildTxButtons,
   shortAddr,
   displayName,
+  formatWibTimeShort,
 };
