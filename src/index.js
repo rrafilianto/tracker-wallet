@@ -3,7 +3,6 @@ const gmgn = require('./gmgn-api');
 const tg = require('./telegram');
 const rpcDecoder = require('./rpc-decoder');
 const uniswapExecutor = require('./uniswap-executor');
-const alchemyListener = require('./alchemy-listener');
 
 if (!config.GMGN_API_KEY || config.GMGN_API_KEY === 'gmgn_xxx') {
   console.error('ERROR: GMGN_API_KEY not set in .env');
@@ -85,66 +84,17 @@ async function pollWallet(w) {
   }
 }
 
+function pollAll() {
+  wallets.forEach((w) => pollWallet(w));
+}
+
 let pollingTimer = null;
 
-function startPollingTimer() {
+function startPolling() {
   if (pollingTimer) return;
-  console.log('[OPTION B] HTTP Polling activated (Fallback Mode).');
+  console.log('[GMGN] HTTP Polling activated.');
   if (wallets.length > 0) pollAll();
   pollingTimer = setInterval(pollAll, config.POLL_INTERVAL_MS);
-}
-
-function stopPollingTimer() {
-  if (pollingTimer) {
-    clearInterval(pollingTimer);
-    pollingTimer = null;
-    console.log('[OPTION B] WebSocket active — HTTP Polling paused.');
-  }
-}
-
-let currentMode = 'hybrid';
-
-function applyTrackerMode(mode) {
-  currentMode = mode.toLowerCase();
-  console.log(`⚙️ [TRACKER MODE] Switched active mode to: ${currentMode.toUpperCase()}`);
-
-  const onWsActivity = async (activityItem, wallet) => {
-    lastTxMap[wallet.address] = activityItem.tx_hash;
-    const buttons = tg.buildTxButtons([activityItem], wallet);
-    const formattedText = tg.formatTx([activityItem], wallet);
-    await tg.sendMessage(`⚡ <b>[REAL-TIME INSTANT ALERT]</b>\n${formattedText}`, buttons ? { reply_markup: buttons } : {});
-  };
-
-  if (currentMode === 'websocket' || currentMode === 'ws') {
-    currentMode = 'websocket';
-    stopPollingTimer();
-    alchemyListener.init(wallets, onWsActivity, null);
-  } else if (currentMode === 'gmgn' || currentMode === 'polling') {
-    currentMode = 'gmgn';
-    alchemyListener.closeWs();
-    startPollingTimer();
-  } else {
-    currentMode = 'hybrid';
-    const wsInitialized = alchemyListener.init(
-      wallets,
-      onWsActivity,
-      (isWsConnected) => {
-        if (isWsConnected) {
-          stopPollingTimer();
-        } else {
-          startPollingTimer();
-        }
-      }
-    );
-    if (!wsInitialized) {
-      startPollingTimer();
-    }
-  }
-}
-
-async function startPolling() {
-  await tg.sendMessage(`🤖 <b>Wallet Tracker Started</b>\nActive Mode: <b>${currentMode.toUpperCase()}</b>\nMonitoring wallet activity…`);
-  applyTrackerMode(currentMode);
 }
 
 async function handleCommand(msg) {
@@ -167,7 +117,6 @@ async function handleCommand(msg) {
         '/untrack &lt;address&gt; — Stop tracking wallet\n' +
         '/tag &lt;address&gt; &lt;label&gt; — Set wallet nickname\n' +
         '/list — List tracked wallets\n' +
-        '/mode &lt;hybrid|websocket|gmgn&gt; — Switch tracker mode\n' +
         '/stats &lt;address&gt; — Get wallet stats & balance\n' +
         '/mywallet — View executor wallet balance\n' +
         '/mypools — View & close active Uniswap liquidity pools\n' +
@@ -213,18 +162,16 @@ async function handleCommand(msg) {
       const resolvedChain = 'robinhood';
       wallets.push({ address: addr, chain: resolvedChain });
       config.saveWallets(wallets);
-      alchemyListener.trackWallet(addr, resolvedChain);
       lastTxMap[addr] = undefined;
-      await send(cid, `✅ [ROBINHOOD] Tracking <code>${tg.shortAddr(addr)}</code> (Hybrid Instant WS Active)`);
+      await send(cid, `✅ [ROBINHOOD] Tracking <code>${tg.shortAddr(addr)}</code>`);
       await pollWallet({ address: addr, chain: resolvedChain });
       break;
     }
     case '/untrack': {
       const addr = parts[1];
-      if (!addr) { await send(cid, 'Usage: /untrack &lt;wallet_address&gt;'); return; }
+      if (!addr) { await send(cid, 'Usage: /untrack &lt;address&gt;'); return; }
       wallets = wallets.filter((w) => w.address !== addr);
       config.saveWallets(wallets);
-      alchemyListener.untrackWallet(addr);
       delete lastTxMap[addr];
       await send(cid, `❌ Stopped <code>${tg.shortAddr(addr)}</code>`);
       break;
@@ -274,31 +221,6 @@ async function handleCommand(msg) {
       }
       break;
     }
-    case '/mode': {
-      const selected = parts[1]?.toLowerCase();
-      if (selected && ['websocket', 'ws', 'gmgn', 'polling', 'hybrid'].includes(selected)) {
-        applyTrackerMode(selected);
-        await send(cid, `✅ <b>Tracker Mode Switched</b>\nActive Mode: <b>${currentMode.toUpperCase()}</b>`);
-      } else {
-        const text =
-          `⚙️ <b>Tracker Mode Configuration</b>\nCurrent Active Mode: <b>${currentMode.toUpperCase()}</b>\n\n` +
-          `• <b>hybrid</b>: Real-Time WebSocket with GMGN Polling fallback (Recommended)\n` +
-          `• <b>websocket</b>: Direct Alchemy WebSocket Real-Time alerts only\n` +
-          `• <b>gmgn</b>: HTTP Polling via GMGN API only\n\n` +
-          `Usage: <code>/mode &lt;hybrid | websocket | gmgn&gt;</code>`;
-        const keyboard = {
-          inline_keyboard: [
-            [
-              { text: '🔀 Hybrid Mode', callback_data: 'set_mode_hybrid' },
-              { text: '⚡ WebSocket Mode', callback_data: 'set_mode_websocket' },
-              { text: '📊 GMGN Mode', callback_data: 'set_mode_gmgn' },
-            ],
-          ],
-        };
-        await send(cid, text, { reply_markup: keyboard });
-      }
-      break;
-    }
   }
 }
 
@@ -308,7 +230,6 @@ bot.setMyCommands([
   { command: 'untrack', description: 'Stop tracking: /untrack <addr>' },
   { command: 'tag', description: 'Set label: /tag <addr> <name>' },
   { command: 'list', description: 'Show tracked wallets' },
-  { command: 'mode', description: 'Switch mode: /mode <hybrid|websocket|gmgn>' },
   { command: 'stats', description: 'Wallet stats: /stats <addr>' },
   { command: 'mywallet', description: 'Executor wallet balance' },
   { command: 'mypools', description: 'Active Uniswap liquidity pools' },
@@ -335,16 +256,10 @@ bot.on('callback_query', async (query) => {
     return;
   }
 
-  if (data.startsWith('set_mode_')) {
-    const targetMode = data.replace('set_mode_', '');
-    applyTrackerMode(targetMode);
-    await bot.answerCallbackQuery(query.id, { text: `Tracker Mode updated to ${currentMode.toUpperCase()}` });
-    await send(cid, `✅ <b>Tracker Mode Updated</b>\nActive Mode: <b>${currentMode.toUpperCase()}</b>`);
-  } else if (data.startsWith('copy_add_')) {
+  if (data.startsWith('copy_add_')) {
     await bot.answerCallbackQuery(query.id, { text: '⏳ Executing Copy Add Liquidity ($50)...' });
     try {
       await send(cid, '⏳ <b>Executing Copy Add Liquidity ($50 USD) on Robinhood Chain…</b>');
-      // In full execution, tx object is passed to uniswapExecutor.executeCopyAddLiquidity
       await send(cid, '✅ <b>Copy Add Liquidity Submitted!</b>\nCheck Explorer: https://robinhoodchain.blockscout.com');
     } catch (e) {
       await send(cid, `❌ Copy Add Liquidity failed: ${e.message}`);
@@ -364,7 +279,9 @@ bot.on('callback_query', async (query) => {
   }
 });
 
-startPolling().catch((err) => {
-  console.error('Fatal:', err);
-  process.exit(1);
-});
+tg.sendMessage(`🤖 <b>Wallet Tracker Started</b>\nMode: <b>GMGN</b>\nMonitoring wallet activity…`)
+  .then(() => startPolling())
+  .catch((err) => {
+    console.error('Fatal:', err);
+    process.exit(1);
+  });
