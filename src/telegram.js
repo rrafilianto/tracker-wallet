@@ -450,15 +450,8 @@ function buildTxButtons(activity, wallet) {
     if (eventType === 'add') {
       keyboard.push([
         {
-          text: `📥 Copy Add Liq ($50) — ${symbol}`,
+          text: `📥 Copy Add Liq — ${symbol}`,
           callback_data: `copy_add_${tx.tx_hash.slice(0, 10)}`,
-        },
-      ]);
-    } else if (eventType === 'remove') {
-      keyboard.push([
-        {
-          text: `📤 Copy Remove Liq — ${symbol}`,
-          callback_data: `copy_remove_${tx.tx_hash.slice(0, 10)}`,
         },
       ]);
     }

@@ -548,8 +548,6 @@ bot.on('callback_query', async (query) => {
     } catch (e) {
       await send(cid, `❌ Copy Add Liquidity failed: ${e.message}`);
     }
-  } else if (data.startsWith('copy_remove_')) {
-    await bot.answerCallbackQuery(query.id, { text: 'Use /mypools to close & auto-swap liquidity positions.' });
   } else if (data.startsWith('close_pos_')) {
     const tokenId = data.replace('close_pos_', '');
     await bot.answerCallbackQuery(query.id, { text: `⏳ Closing Position #${tokenId} & Swapping to USDG...` });
