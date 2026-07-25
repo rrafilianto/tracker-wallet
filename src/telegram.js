@@ -277,7 +277,25 @@ function formatCompactNumber(val) {
   return num.toFixed(2).replace(/\.00$/, '');
 }
 
-function formatExecutorPositions(positions) {
+const SUBSCRIPT_DIGITS = '₀₁₂₃₄₅₆₇₈₉';
+function formatPriceCompact(price) {
+  if (!price || !isFinite(price) || price <= 0) return '0';
+  if (price >= 1) return price.toPrecision(4);
+  if (price >= 0.01) return price.toPrecision(3);
+
+  const str = price.toFixed(20);
+  const afterDecimal = str.split('.')[1] || '';
+  let zeros = 0;
+  for (const ch of afterDecimal) {
+    if (ch === '0') zeros++;
+    else break;
+  }
+  const sigDigits = afterDecimal.slice(zeros, zeros + 3);
+  const sub = zeros.toString().split('').map(d => SUBSCRIPT_DIGITS[+d]).join('');
+  return `0.0${sub}${sigDigits}`;
+}
+
+function formatExecutorPositions(positions, updatedAt = null) {
   if (!positions || positions.length === 0) {
     return {
       text: '🏊 <b>Active Positions</b> (Uniswap V4)\nNo active liquidity positions found on Robinhood Chain.',
@@ -288,14 +306,27 @@ function formatExecutorPositions(positions) {
   let totalPortfolioUsd = 0;
   let totalDepUsd = 0;
   let totalUnclaimedUsd = 0;
-  let totalEst24hUsd = 0;
+  let totalEstHourlyUsd = 0;
 
   const lines = [`🏊 <b>Active Liquidity Positions (${positions.length})</b>`];
-  const keyboard = [];
+  const keyboard = [
+    [{ text: '🔄 Refresh Positions', callback_data: 'refresh_positions' }],
+  ];
 
   positions.forEach((pos, i) => {
     const pair = pos.symbol1 ? `${pos.symbol0}/${pos.symbol1}` : pos.symbol0;
-    const rangeStr = pos.tickUpper ? `${pos.tickLower} <> ${pos.tickUpper}` : pos.tickLower;
+
+    let rangeStr = '';
+    if (pos.priceMin !== undefined && pos.priceMax !== undefined && pos.priceNow !== undefined) {
+      const minStr = formatPriceCompact(pos.priceMin);
+      const maxStr = formatPriceCompact(pos.priceMax);
+      const nowStr = formatPriceCompact(pos.priceNow);
+      const statusStr = pos.inRange ? '🟢 In Range' : '🔴 Out of Range';
+      rangeStr = `${minStr}–${maxStr} (now ${nowStr}) ${statusStr}`;
+    } else {
+      rangeStr = pos.tickUpper ? `${pos.tickLower} <> ${pos.tickUpper}` : pos.tickLower;
+    }
+
     const ageStr = pos.ageStr || '-';
 
     // Deposit line
@@ -325,11 +356,11 @@ function formatExecutorPositions(positions) {
       ? `\n   Unclaimed Fees: <b>${unclaimedTokens}${uncUsdStr}</b>`
       : '';
 
-    // 24h Fees line
-    const est24hUsd = pos.est24hUsd || 0;
-    const est24hPercent = pos.est24hPercent || 0;
-    const est24hLine = est24hUsd > 0
-      ? `\n   24h Est. Fees: <b>+$${est24hUsd.toFixed(2)} USD/day (+${est24hPercent.toFixed(2)}%/day) ⚡</b>`
+    // Hourly Fees line
+    const estHourlyUsd = pos.estHourlyUsd || 0;
+    const estHourlyPercent = pos.estHourlyPercent || 0;
+    const estHourlyLine = estHourlyUsd > 0
+      ? `\n   Est. Fees/hr: <b>+$${estHourlyUsd.toFixed(2)} USD/hr (+${estHourlyPercent.toFixed(2)}%/hr) ⚡</b>`
       : '';
 
     // PnL line
@@ -344,14 +375,14 @@ function formatExecutorPositions(positions) {
     totalPortfolioUsd += posUsd;
     totalDepUsd += (pos.depTotalUsd || 0);
     totalUnclaimedUsd += uncUsd;
-    totalEst24hUsd += est24hUsd;
+    totalEstHourlyUsd += estHourlyUsd;
 
     lines.push(
       `\n${i + 1}. <b>${pair}</b> (${pos.fee}%) - Position #${pos.tokenId}` +
         depositLine +
         currentLine +
         unclaimedLine +
-        est24hLine +
+        estHourlyLine +
         pnlLine +
         `\n   Age: <b>${ageStr}</b>` +
         `\n   Price Range: <b>${rangeStr}</b>`,
@@ -374,14 +405,17 @@ function formatExecutorPositions(positions) {
   if (totalUnclaimedUsd > 0) {
     summaryHeader += ` (Unclaimed: ~$${totalUnclaimedUsd.toFixed(2)} USD)`;
   }
-  if (totalEst24hUsd > 0) {
-    summaryHeader += ` | 24h Est: <b>+$${totalEst24hUsd.toFixed(2)} USD/day</b>`;
+  if (totalEstHourlyUsd > 0) {
+    summaryHeader += ` | Est/hr: <b>+$${totalEstHourlyUsd.toFixed(2)} USD/hr</b>`;
   }
   if (totalDepUsd > 0) {
     summaryHeader += ` | PnL: <b>${pnlSign}$${netPnlUsd.toFixed(2)} (${pnlSign}${netPnlPercent.toFixed(1)}%)</b>`;
   }
 
   lines.unshift(summaryHeader + '\n');
+  if (updatedAt) {
+    lines.push(`\n🕒 <i>Refreshed: ${updatedAt}</i>`);
+  }
 
   return {
     text: lines.join('\n'),

@@ -15,6 +15,44 @@ if (!config.TELEGRAM_BOT_TOKEN || !config.TELEGRAM_CHAT_ID) {
 
 let wallets = config.loadWallets();
 let lastTxMap = {};
+let deploySettings = config.loadSettings(); // { amount_usd, range_pct }
+const pendingCopyTrades = new Map(); // shortKey -> fullTxHash
+const pendingPoolSelections = new Map(); // shortKey -> { tokenAddr, pools }
+const ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
+
+// ── Settings helpers ────────────────────────────────────────────────────────
+const AMOUNT_PRESETS = [10, 25, 50, 100, 200, 500];
+const PCT_PRESETS    = [5, 10, 20, 30, 50, 75]; // % below current price
+
+function buildSettingsText(s) {
+  return (
+    `⚙️ <b>LP Deploy Settings</b>\n\n` +
+    `💰 Amount: <b>$${s.amount_usd} USDG</b>\n` +
+    `📉 Range: <b>-${s.range_pct}% di bawah harga saat ini</b>\n\n` +
+    `<b>💰 Ubah Amount (USDG):</b>\n` +
+    `<b>📉 Ubah Range (% bawah harga):</b>`
+  );
+}
+
+function buildSettingsMarkup(s) {
+  const amtRow1 = AMOUNT_PRESETS.slice(0, 3).map(v => ({
+    text: s.amount_usd === v ? `✅ $${v}` : `$${v}`,
+    callback_data: `settings_amount_${v}`,
+  }));
+  const amtRow2 = AMOUNT_PRESETS.slice(3).map(v => ({
+    text: s.amount_usd === v ? `✅ $${v}` : `$${v}`,
+    callback_data: `settings_amount_${v}`,
+  }));
+  const pctRow1 = PCT_PRESETS.slice(0, 3).map(v => ({
+    text: s.range_pct === v ? `✅ -${v}%` : `-${v}%`,
+    callback_data: `settings_pct_${v}`,
+  }));
+  const pctRow2 = PCT_PRESETS.slice(3).map(v => ({
+    text: s.range_pct === v ? `✅ -${v}%` : `-${v}%`,
+    callback_data: `settings_pct_${v}`,
+  }));
+  return { inline_keyboard: [amtRow1, amtRow2, pctRow1, pctRow2] };
+}
 
 const bot = tg.init(config.TELEGRAM_BOT_TOKEN, config.TELEGRAM_CHAT_ID);
 console.log('🚀 [STARTUP] Tracker Wallet Bot initialized successfully!');
@@ -61,6 +99,13 @@ async function pollWallet(w) {
 
     const prev = lastTxMap[w.address];
     const buttons = tg.buildTxButtons(list, w);
+
+    // Cache tx data for copy trade callbacks
+    list.forEach((tx) => {
+      if ((tx.event_type || '').toLowerCase() === 'add' && tx.tx_hash) {
+        pendingCopyTrades.set(tx.tx_hash.slice(0, 10), tx);
+      }
+    });
 
     if (prev === undefined) {
       lastTxMap[w.address] = latestTxHash;
@@ -120,6 +165,7 @@ async function handleCommand(msg) {
         '/stats &lt;address&gt; — Get wallet stats & balance\n' +
         '/mywallet — View executor wallet balance\n' +
         '/mypools — View & close active Uniswap liquidity pools\n' +
+        '/settings — LP deploy settings (amount & tick range)\n' +
         '/chains — Show supported chain'
       );
       break;
@@ -143,6 +189,10 @@ async function handleCommand(msg) {
       } catch (err) {
         await send(cid, `Error loading executor positions: ${err.message}`);
       }
+      break;
+    }
+    case '/settings': {
+      await send(cid, buildSettingsText(deploySettings), { reply_markup: buildSettingsMarkup(deploySettings) });
       break;
     }
     case '/chains': {
@@ -233,6 +283,7 @@ bot.setMyCommands([
   { command: 'stats', description: 'Wallet stats: /stats <addr>' },
   { command: 'mywallet', description: 'Executor wallet balance' },
   { command: 'mypools', description: 'Active Uniswap liquidity pools' },
+  { command: 'settings', description: 'LP deploy settings (amount & ticks)' },
   { command: 'chains', description: 'Show available chains' },
   { command: 'help', description: 'Show all commands' },
 ]).then(() => {
@@ -242,10 +293,170 @@ bot.setMyCommands([
 });
 
 bot.on('message', (msg) => {
-  if (msg.text?.startsWith('/')) {
+  const text = msg.text?.trim();
+  if (!text) return;
+  if (text.startsWith('/')) {
     handleCommand(msg).catch((err) => console.error(err));
+    return;
+  }
+  if (ADDRESS_RE.test(text)) {
+    handleAutoDeploy(msg, text).catch((err) => console.error(err));
   }
 });
+
+function formatTvl(tvlUsd) {
+  if (tvlUsd >= 1_000_000) return `$${(tvlUsd / 1_000_000).toFixed(2)}M`;
+  if (tvlUsd >= 1_000) return `$${(tvlUsd / 1_000).toFixed(1)}K`;
+  if (tvlUsd > 0) return `$${tvlUsd.toFixed(0)}`;
+  return 'N/A';
+}
+
+// Format harga kecil ke notasi compact: 0.0₆641 (seperti di Uniswap UI)
+const SUBSCRIPT_DIGITS = '₀₁₂₃₄₅₆₇₈₉';
+function formatPriceCompact(price) {
+  if (!price || !isFinite(price) || price <= 0) return '0';
+  if (price >= 1) return price.toPrecision(4);
+  if (price >= 0.01) return price.toPrecision(3);
+
+  const str = price.toFixed(20);
+  const afterDecimal = str.split('.')[1] || '';
+  let zeros = 0;
+  for (const ch of afterDecimal) {
+    if (ch === '0') zeros++;
+    else break;
+  }
+  const sigDigits = afterDecimal.slice(zeros, zeros + 3);
+  const sub = zeros.toString().split('').map(d => SUBSCRIPT_DIGITS[+d]).join('');
+  return `0.0${sub}${sigDigits}`;
+}
+
+// Konversi tick ke harga token dalam USDG (human-readable)
+function tickToTokenPrice(tick, dec0, dec1, isC0Usdg) {
+  const rawPrice = Math.pow(1.0001, tick);
+  if (isC0Usdg) {
+    // c0=USDG(6 dec), c1=TOKEN — harga TOKEN dalam USDG = 10^(dec1-6) / rawPrice
+    return Math.pow(10, dec1 - 6) / rawPrice;
+  } else {
+    // c0=TOKEN, c1=USDG(6 dec) — harga TOKEN dalam USDG = rawPrice × 10^(dec0-6)
+    return rawPrice * Math.pow(10, dec0 - 6);
+  }
+}
+
+// Helper: bangun teks + keyboard kartu konfirmasi deploy
+function buildDeployConfirmation(poolInfo, shortKey, idx, settings, updatedAt = null) {
+  const { isC0Usdg, dec0, dec1, pk, tick } = poolInfo;
+  const tokenSym    = isC0Usdg ? poolInfo.sym1 : poolInfo.sym0;
+  const feePct      = (pk.fee / 10000).toFixed(2);
+  const tvlStr      = formatTvl(poolInfo.tvlUsd);
+  const amount      = settings.amount_usd;
+  const rangePct    = settings.range_pct;
+
+  // Hitung tick range
+  const tickSpacing = Number(pk.tickSpacing);
+  const alignDown   = (t, ts) => Math.floor(t / ts) * ts;
+  const tickUpper   = alignDown(tick, tickSpacing);
+  const ratio       = 1 - rangePct / 100;
+  const rawTickDiff = Math.log(ratio) / Math.log(1.0001);
+  const tickLower   = tickUpper + Math.floor(rawTickDiff / tickSpacing) * tickSpacing;
+
+  const priceLower  = tickToTokenPrice(tickLower, dec0, dec1, isC0Usdg);
+  const priceUpper  = tickToTokenPrice(tickUpper, dec0, dec1, isC0Usdg);
+
+  const sqrtP    = Number(poolInfo.sqrtPriceX96) / Math.pow(2, 96);
+  const rawNow   = sqrtP * sqrtP;
+  const priceNow = isC0Usdg
+    ? Math.pow(10, dec1 - 6) / rawNow
+    : rawNow * Math.pow(10, dec0 - 6);
+
+  const rangeStr = `${formatPriceCompact(priceLower)}–${formatPriceCompact(priceUpper)} (now ${formatPriceCompact(priceNow)})`;
+
+  let text =
+    `📋 <b>Konfirmasi Deploy LP</b>\n\n` +
+    `🏊 Pair: <b>${tokenSym}/USDG</b>\n` +
+    `💸 Fee Tier: <b>${feePct}%</b>\n` +
+    `📊 TVL Pool: <b>~${tvlStr}</b>\n` +
+    `💰 Amount: <b>$${amount} USDG</b>\n` +
+    `📉 Range: <b>${rangeStr}</b>`;
+
+  if (updatedAt) text += `\n🕒 <i>Refreshed: ${updatedAt}</i>`;
+  text += `\n\nLanjutkan deploy?`;
+
+  const keyboard = {
+    inline_keyboard: [
+      [{ text: '🔄 Refresh Price', callback_data: `pool_refresh_${shortKey}_${idx}` }],
+      [
+        { text: '✅ Confirm Deploy', callback_data: `pool_confirm_${shortKey}_${idx}` },
+        { text: '❌ Cancel',         callback_data: `pool_cancel_${shortKey}` },
+      ],
+    ],
+  };
+
+  return { text, keyboard };
+}
+
+async function handleAutoDeploy(msg, addr) {
+  const cid = msg.chat.id.toString();
+  if (cid !== config.TELEGRAM_CHAT_ID) return;
+
+  const amount = deploySettings.amount_usd;
+  const shortKey = addr.slice(2, 12).toLowerCase();
+
+  // Kirim pesan loading dulu
+  const loadingMsg = await send(cid,
+    `🔍 <b>Mencari pool USDG...</b>\n` +
+    `Token: <code>${addr}</code>\n\n` +
+    `⏳ Sedang fetch data pool dari Uniswap V4...`
+  );
+
+  try {
+    const pools = await uniswapExecutor.findAllUsdgPools(addr);
+
+    if (pools.length === 0) {
+      await bot.editMessageText(
+        `❌ <b>Tidak ada pool USDG ditemukan</b>\n` +
+        `Token: <code>${addr}</code>\n\n` +
+        `Token ini belum memiliki pool aktif di Uniswap V4 (semua fee tier dicek).`,
+        { chat_id: cid, message_id: loadingMsg.message_id, parse_mode: 'HTML' }
+      );
+      return;
+    }
+
+    // Simpan pools untuk dipakai saat user klik
+    pendingPoolSelections.set(shortKey, { tokenAddr: addr, pools });
+
+    const tokenSym = pools[0].isC0Usdg ? pools[0].sym1 : pools[0].sym0;
+
+    // Bangun keyboard — satu baris per pool
+    const poolButtons = pools.map((p, idx) => {
+      const feePct = (p.pk.fee / 10000).toFixed(2);
+      const tvlStr = formatTvl(p.tvlUsd);
+      return [{
+        text: `🏊 ${feePct}% fee  |  TVL ~${tvlStr}`,
+        callback_data: `pool_deploy_${shortKey}_${idx}`,
+      }];
+    });
+    poolButtons.push([{ text: '❌ Cancel', callback_data: `pool_cancel_${shortKey}` }]);
+
+    const headerText =
+      `🌊 <b>Pool USDG tersedia — ${tokenSym}</b>\n\n` +
+      `💰 Amount: <b>$${deploySettings.amount_usd} USDG</b>\n` +
+      `📉 Range: <b>-${deploySettings.range_pct}% di bawah harga</b>\n` +
+      `<i>Ubah via /settings</i>\n\n` +
+      `<b>Pilih pool untuk deploy LP:</b>`;
+
+    await bot.editMessageText(headerText, {
+      chat_id: cid,
+      message_id: loadingMsg.message_id,
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: poolButtons },
+    });
+  } catch (err) {
+    await bot.editMessageText(
+      `❌ <b>Gagal fetch pool:</b> ${err.message}`,
+      { chat_id: cid, message_id: loadingMsg.message_id, parse_mode: 'HTML' }
+    );
+  }
+}
 
 bot.on('callback_query', async (query) => {
   const data = query.data;
@@ -257,10 +468,65 @@ bot.on('callback_query', async (query) => {
   }
 
   if (data.startsWith('copy_add_')) {
-    await bot.answerCallbackQuery(query.id, { text: '⏳ Executing Copy Add Liquidity ($50)...' });
+    const shortKey = data.replace('copy_add_', '');
+    const txData = pendingCopyTrades.get(shortKey);
+    const amount = deploySettings.amount_usd;
+
+    await bot.answerCallbackQuery(query.id, { text: '🔍 Mencari pool USDG...' });
+
     try {
-      await send(cid, '⏳ <b>Executing Copy Add Liquidity ($50 USD) on Robinhood Chain…</b>');
-      await send(cid, '✅ <b>Copy Add Liquidity Submitted!</b>\nCheck Explorer: https://robinhoodchain.blockscout.com');
+      if (!txData) throw new Error('Transaction data expired. Please wait for a new activity alert.');
+      const tokenAddr = txData.token?.address;
+      if (!tokenAddr || !ADDRESS_RE.test(tokenAddr)) {
+        throw new Error('Token contract address not found in activity data.');
+      }
+      const tokenSym = txData.token?.symbol || tg.shortAddr(tokenAddr);
+
+      // Kirim loading message
+      const loadingMsg = await send(cid,
+        `🔍 <b>Copy LP — Mencari pool USDG...</b>\n` +
+        `Token: <b>${tokenSym}</b> (<code>${tg.shortAddr(tokenAddr)}</code>)\n\n` +
+        `⏳ Sedang fetch data pool dari Uniswap V4...`
+      );
+
+      const pools = await uniswapExecutor.findAllUsdgPools(tokenAddr);
+
+      if (pools.length === 0) {
+        await bot.editMessageText(
+          `❌ <b>Tidak ada pool USDG ditemukan</b>\n` +
+          `Token: <b>${tokenSym}</b>\n\n` +
+          `Token ini belum memiliki pool aktif di Uniswap V4.`,
+          { chat_id: cid, message_id: loadingMsg.message_id, parse_mode: 'HTML' }
+        );
+        return;
+      }
+
+      // Simpan ke pendingPoolSelections (reuse flow yang sama dengan auto-deploy)
+      pendingPoolSelections.set(shortKey, { tokenAddr, pools });
+
+      // Bangun keyboard pilihan pool
+      const poolButtons = pools.map((p, idx) => {
+        const feePct = (p.pk.fee / 10000).toFixed(2);
+        const tvlStr = formatTvl(p.tvlUsd);
+        return [{
+          text: `🏊 ${feePct}% fee  |  TVL ~${tvlStr}`,
+          callback_data: `pool_deploy_${shortKey}_${idx}`,
+        }];
+      });
+      poolButtons.push([{ text: '❌ Cancel', callback_data: `pool_cancel_${shortKey}` }]);
+
+      const headerText =
+        `🌊 <b>Copy LP — Pool tersedia — ${tokenSym}</b>\n\n` +
+        `💰 Amount: <b>$${amount} USDG</b>\n` +
+        `📉 Range: <b>-${deploySettings.range_pct}% di bawah harga</b>\n` +
+        `<b>Pilih pool untuk deploy LP:</b>`;
+
+      await bot.editMessageText(headerText, {
+        chat_id: cid,
+        message_id: loadingMsg.message_id,
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: poolButtons },
+      });
     } catch (e) {
       await send(cid, `❌ Copy Add Liquidity failed: ${e.message}`);
     }
@@ -276,6 +542,156 @@ bot.on('callback_query', async (query) => {
     } catch (e) {
       await send(cid, `❌ Failed to close position #${tokenId}: ${e.message}`);
     }
+  } else if (data === 'refresh_positions') {
+    await bot.answerCallbackQuery(query.id, { text: '🔄 Fetching latest positions data...' });
+    try {
+      const posData = await uniswapExecutor.getExecutorPositions();
+      const now = new Date().toLocaleTimeString('id-ID', {
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+      });
+      const formatted = tg.formatExecutorPositions(posData, now);
+      await bot.editMessageText(formatted.text, {
+        chat_id: cid,
+        message_id: query.message.message_id,
+        parse_mode: 'HTML',
+        reply_markup: formatted.reply_markup,
+      });
+    } catch (e) {
+      if (e.message?.includes('message is not modified')) {
+        await bot.answerCallbackQuery(query.id, { text: '✅ Positions data is up to date!' });
+      } else {
+        await bot.answerCallbackQuery(query.id, { text: `❌ Refresh failed: ${e.message}` });
+      }
+    }
+  } else if (data.startsWith('pool_cancel_')) {
+    const shortKey = data.replace('pool_cancel_', '');
+    pendingPoolSelections.delete(shortKey);
+    await bot.answerCallbackQuery(query.id, { text: 'Dibatalkan' });
+    await send(cid, '❌ Auto-Deploy dibatalkan.');
+  } else if (data.startsWith('pool_deploy_')) {
+    // Format: pool_deploy_{shortKey}_{idx}  — tampilkan konfirmasi, BUKAN langsung deploy
+    const raw = data.replace('pool_deploy_', '');
+    const lastUnderscore = raw.lastIndexOf('_');
+    const shortKey = raw.slice(0, lastUnderscore);
+    const idx = parseInt(raw.slice(lastUnderscore + 1), 10);
+
+    await bot.answerCallbackQuery(query.id, { text: '📋 Detail pool dipilih' });
+
+    try {
+      const selection = pendingPoolSelections.get(shortKey);
+      if (!selection) throw new Error('Session expired. Paste token address again.');
+      const poolInfo = selection.pools[idx];
+      if (!poolInfo) throw new Error('Pool data tidak ditemukan.');
+
+      const { text, keyboard } = buildDeployConfirmation(poolInfo, shortKey, idx, deploySettings);
+      await send(cid, text, { reply_markup: keyboard });
+    } catch (e) {
+      await send(cid, `❌ Error: ${e.message}`);
+    }
+  } else if (data.startsWith('pool_refresh_')) {
+    // Format: pool_refresh_{shortKey}_{idx}  — re-fetch harga on-chain & update konfirmasi
+    const raw = data.replace('pool_refresh_', '');
+    const lastUnderscore = raw.lastIndexOf('_');
+    const shortKey = raw.slice(0, lastUnderscore);
+    const idx = parseInt(raw.slice(lastUnderscore + 1), 10);
+
+    await bot.answerCallbackQuery(query.id, { text: '🔄 Fetching latest price...' });
+
+    try {
+      const selection = pendingPoolSelections.get(shortKey);
+      if (!selection) throw new Error('Session expired.');
+      const poolInfo = selection.pools[idx];
+      if (!poolInfo) throw new Error('Pool data tidak ditemukan.');
+
+      // Fetch fresh slot0 dari blockchain
+      const fresh = await uniswapExecutor.getPoolSlot0(poolInfo.poolId);
+      poolInfo.sqrtPriceX96 = fresh.sqrtPriceX96;
+      poolInfo.tick          = fresh.tick;
+
+      const now = new Date().toLocaleTimeString('id-ID', {
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+      });
+
+      const { text, keyboard } = buildDeployConfirmation(poolInfo, shortKey, idx, deploySettings, now);
+      await bot.editMessageText(text, {
+        chat_id: cid,
+        message_id: query.message.message_id,
+        parse_mode: 'HTML',
+        reply_markup: keyboard,
+      });
+    } catch (e) {
+      await send(cid, `❌ Refresh gagal: ${e.message}`);
+    }
+  } else if (data.startsWith('pool_confirm_')) {
+    // Format: pool_confirm_{shortKey}_{idx}  — eksekusi deploy setelah konfirmasi
+    const raw = data.replace('pool_confirm_', '');
+    const lastUnderscore = raw.lastIndexOf('_');
+    const shortKey = raw.slice(0, lastUnderscore);
+    const idx = parseInt(raw.slice(lastUnderscore + 1), 10);
+
+    const selection  = pendingPoolSelections.get(shortKey);
+    const amount     = deploySettings.amount_usd;
+    const rangePct   = deploySettings.range_pct;
+    await bot.answerCallbackQuery(query.id, { text: `⏳ Deploying $${amount} USDG LP...` });
+
+    try {
+      if (!selection) throw new Error('Session expired. Paste token address again.');
+      const poolInfo = selection.pools[idx];
+      if (!poolInfo) throw new Error('Pool data tidak ditemukan.');
+
+      const tokenSym = poolInfo.isC0Usdg ? poolInfo.sym1 : poolInfo.sym0;
+      const feePct = (poolInfo.pk.fee / 10000).toFixed(2);
+      const tvlStr = formatTvl(poolInfo.tvlUsd);
+
+      await send(cid,
+        `⏳ <b>Deploying LP ${tokenSym}/USDG</b>\n` +
+        `Fee: <b>${feePct}%</b> | TVL ~${tvlStr}\n` +
+        `Amount: <b>$${amount} USDG</b> | Range: <b>-${rangePct}%</b>…`
+      );
+
+      const result = await uniswapExecutor.executeAutoDeployLp(selection.tokenAddr, amount, poolInfo, rangePct);
+      pendingPoolSelections.delete(shortKey);
+
+      await send(cid,
+        `✅ <b>LP Deployed Successfully!</b>\n` +
+        `Pair: <b>${result.tokenSymbol}/USDG</b>\n` +
+        `Fee Tier: <b>${(result.fee / 10000).toFixed(2)}%</b>\n` +
+        `Range: <b>${result.tickLower} → ${result.tickUpper}</b>\n` +
+        `Tx: https://robinhoodchain.blockscout.com/tx/${result.hash}`
+      );
+    } catch (e) {
+      await send(cid, `❌ Deploy gagal: ${e.message}`);
+    }
+  } else if (data.startsWith('settings_amount_')) {
+    const val = parseInt(data.replace('settings_amount_', ''), 10);
+    if (!AMOUNT_PRESETS.includes(val)) {
+      await bot.answerCallbackQuery(query.id, { text: 'Invalid value' });
+      return;
+    }
+    deploySettings.amount_usd = val;
+    config.saveSettings(deploySettings);
+    await bot.answerCallbackQuery(query.id, { text: `✅ Amount diubah ke $${val} USDG` });
+    await bot.editMessageText(buildSettingsText(deploySettings), {
+      chat_id: cid,
+      message_id: query.message.message_id,
+      parse_mode: 'HTML',
+      reply_markup: buildSettingsMarkup(deploySettings),
+    });
+  } else if (data.startsWith('settings_pct_')) {
+    const val = parseInt(data.replace('settings_pct_', ''), 10);
+    if (!PCT_PRESETS.includes(val)) {
+      await bot.answerCallbackQuery(query.id, { text: 'Invalid value' });
+      return;
+    }
+    deploySettings.range_pct = val;
+    config.saveSettings(deploySettings);
+    await bot.answerCallbackQuery(query.id, { text: `✅ Range diubah ke -${val}%` });
+    await bot.editMessageText(buildSettingsText(deploySettings), {
+      chat_id: cid,
+      message_id: query.message.message_id,
+      parse_mode: 'HTML',
+      reply_markup: buildSettingsMarkup(deploySettings),
+    });
   }
 });
 

@@ -2,6 +2,18 @@ const { ethers } = require('ethers');
 const { Token, CurrencyAmount, Ether } = require('@uniswap/sdk-core');
 const v4sdk = require('@uniswap/v4-sdk');
 const { Pool, Position } = v4sdk;
+const rpcDecoder = require('./rpc-decoder');
+
+// Standard Uniswap V4 fee tier → tickSpacing mapping (hooks = 0x0 default)
+const STANDARD_FEE_TIERS = [
+  { fee: 100, tickSpacing: 1 },
+  { fee: 500, tickSpacing: 10 },
+  { fee: 3000, tickSpacing: 60 },
+  { fee: 10000, tickSpacing: 200 },
+];
+const MIN_TICK = -887272;
+const MAX_TICK = 887272;
+const HOOKS_ZERO = '0x0000000000000000000000000000000000000000';
 
 const UNISWAP_V4_POSM_ABI = [
   'function ownerOf(uint256 tokenId) view returns (address)',
@@ -15,6 +27,7 @@ const STATEVIEW_ABI = [
   'function getSlot0(bytes32 poolId) view returns (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee)',
   'function getFeeGrowthInside(bytes32 poolId, int24 tickLower, int24 tickUpper) view returns (uint256 feeGrowthInside0X128, uint256 feeGrowthInside1X128)',
   'function getPositionInfo(bytes32 poolId, bytes32 positionId) view returns (uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128)',
+  'function getLiquidity(bytes32 poolId) view returns (uint128 liquidity)',
 ];
 
 // Standard ABIs
@@ -31,6 +44,18 @@ const ERC20_ABI = [
 const UNISWAP_V4_POSM_ADDRESS = process.env.UNISWAP_V4_POSM_ADDRESS || '0x58daec3116aae6D93017bAAea7749052E8a04fA7';
 const UNISWAP_V4_STATEVIEW_ADDRESS = process.env.UNISWAP_V4_STATEVIEW_ADDRESS || '0xF3334192D15450CdD385c8B70e03f9A6bD9E673b';
 const USDG_ADDRESS = process.env.USDG_ADDRESS || '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168';
+const UNIVERSAL_ROUTER_ADDRESS = process.env.UNIVERSAL_ROUTER_ADDRESS || '0x8876789976deCbFcbBBe364623C63652dB8c0904';
+const PERMIT2_ADDRESS = process.env.PERMIT2_ADDRESS || '0x000000000022D473030F116dDEE9F6B43aC78BA3';
+
+// Universal Router executes V4 swaps via command 0x10 (V4_SWAP)
+const UNIVERSAL_ROUTER_ABI = [
+  'function execute(bytes commands, bytes[] inputs, uint256 deadline) payable',
+];
+const PERMIT2_ABI = [
+  'function approve(address token, address spender, uint160 amount, uint48 expiration)',
+  'function allowance(address owner, address token, address spender) view returns (uint160 amount, uint48 expiration, uint48 nonce)',
+];
+const V4_SWAP_COMMAND = '0x10';
 
 const signed24 = (v) => (v >= 0x800000 ? v - 0x1000000 : v);
 const MASK256 = (1n << 256n) - 1n;
@@ -156,7 +181,13 @@ async function getV4PositionDetails(tokenId, walletAddress) {
     valueUsd,
     feeUsd,
     feePct: fee / 10000,
-    rangeStr
+    rangeStr,
+    tickLower,
+    tickUpper,
+    tickCurrent: tick,
+    sqrtPriceX96: s0.sqrtPriceX96.toString(),
+    isC0Usdg: isC0Usd,
+    isC1Usdg: isC1Usd,
   };
 }
 
@@ -415,11 +446,40 @@ async function getExecutorPositions() {
           const pnlUsd = depTotalUsd > 0 ? totalPosUsd - depTotalUsd : 0;
           const pnlPercent = depTotalUsd > 0 ? (pnlUsd / depTotalUsd) * 100 : 0;
 
-          const est24hUsd = v4Detail.feeUsd > 0 ? (v4Detail.feeUsd / ageHours) * 24 : 0;
+          const estHourlyUsd = v4Detail.feeUsd > 0 ? v4Detail.feeUsd / ageHours : 0;
           const baseForYield = depTotalUsd > 0 ? depTotalUsd : (v4Detail.valueUsd > 0 ? v4Detail.valueUsd : 0);
-          const est24hPercent = baseForYield > 0 ? (est24hUsd / baseForYield) * 100 : 0;
+          const estHourlyPercent = baseForYield > 0 ? (estHourlyUsd / baseForYield) * 100 : 0;
 
           const ageStr = formatAgeFromTimestamp(nftMintTsMap[tid]);
+
+          // Compute price range and inRange status
+          const tickCurrent = Number(v4Detail.tickCurrent);
+          const tickLower = Number(v4Detail.tickLower);
+          const tickUpper = Number(v4Detail.tickUpper);
+          const inRange = tickCurrent >= tickLower && tickCurrent <= tickUpper;
+
+          let priceA = 0;
+          let priceB = 0;
+          let priceNow = 0;
+          const sqrtP = Number(v4Detail.sqrtPriceX96) / Math.pow(2, 96);
+          const rawNow = sqrtP * sqrtP;
+
+          if (v4Detail.isC0Usdg) {
+            priceA = Math.pow(10, v4Detail.dec1 - 6) / Math.pow(1.0001, tickLower);
+            priceB = Math.pow(10, v4Detail.dec1 - 6) / Math.pow(1.0001, tickUpper);
+            priceNow = Math.pow(10, v4Detail.dec1 - 6) / rawNow;
+          } else if (v4Detail.isC1Usdg) {
+            priceA = Math.pow(1.0001, tickLower) * Math.pow(10, v4Detail.dec0 - 6);
+            priceB = Math.pow(1.0001, tickUpper) * Math.pow(10, v4Detail.dec0 - 6);
+            priceNow = rawNow * Math.pow(10, v4Detail.dec0 - 6);
+          } else {
+            priceA = Math.pow(1.0001, tickLower) * Math.pow(10, v4Detail.dec0 - v4Detail.dec1);
+            priceB = Math.pow(1.0001, tickUpper) * Math.pow(10, v4Detail.dec0 - v4Detail.dec1);
+            priceNow = rawNow * Math.pow(10, v4Detail.dec0 - v4Detail.dec1);
+          }
+
+          const priceMin = Math.min(priceA, priceB);
+          const priceMax = Math.max(priceA, priceB);
 
           positions.push({
             tokenId: tid,
@@ -434,8 +494,8 @@ async function getExecutorPositions() {
             unclaimed0: v4Detail.unclaimed0,
             unclaimed1: v4Detail.unclaimed1,
             unclaimedUsd: v4Detail.feeUsd,
-            est24hUsd,
-            est24hPercent,
+            estHourlyUsd,
+            estHourlyPercent,
             pnlUsd,
             pnlPercent,
             fee: v4Detail.feePct,
@@ -443,6 +503,10 @@ async function getExecutorPositions() {
             ageStr,
             tickLower: v4Detail.rangeStr,
             tickUpper: '',
+            priceMin,
+            priceMax,
+            priceNow,
+            inRange,
             isV4: true
           });
         } catch {
@@ -459,74 +523,409 @@ async function getExecutorPositions() {
 
 async function executeCopyAddLiquidity(tx, amountUsd = 50) {
   const wallet = getWallet();
-  const token0Addr = tx.token?.address || tx.token_address;
-  const token1Addr = tx.quote_token?.token_address || tx.quote_address || USDG_ADDRESS;
-
-  if (!token0Addr || !token1Addr) {
-    throw new Error('Missing token contract addresses for liquidity minting');
-  }
-
-  // Approval for token0 and token1
-  const token0 = new ethers.Contract(token0Addr, ERC20_ABI, wallet);
-  const token1 = new ethers.Contract(token1Addr, ERC20_ABI, wallet);
-
-  const parsedAmountUsd = ethers.parseUnits(amountUsd.toString(), 6); // Default USDG has 6 decimals
-
-  // Check and approve allowance for V4 PositionManager
-  const allow0 = await token0.allowance(wallet.address, UNISWAP_V4_POSM_ADDRESS).catch(() => 0n);
-  if (allow0 < parsedAmountUsd) {
-    const txApp0 = await token0.approve(UNISWAP_V4_POSM_ADDRESS, ethers.MaxUint256);
-    await txApp0.wait();
-  }
-
-  const allow1 = await token1.allowance(wallet.address, UNISWAP_V4_POSM_ADDRESS).catch(() => 0n);
-  if (allow1 < parsedAmountUsd) {
-    const txApp1 = await token1.approve(UNISWAP_V4_POSM_ADDRESS, ethers.MaxUint256);
-    await txApp1.wait();
-  }
-
-  const tickLower = tx.tick_lower ?? -887270;
-  const tickUpper = tx.tick_upper ?? 887270;
-  const fee = tx.fee ?? 3000;
-  const tickSpacing = tx.tick_spacing ?? 60;
-  const hooks = tx.hooks ?? ethers.ZeroAddress;
-
-  // Use V4PositionPlanner from @uniswap/v4-sdk
-  const planner = new v4sdk.V4PositionPlanner();
-  planner.addMint(
-    { currency0: token0Addr, currency1: token1Addr, fee, tickSpacing, hooks },
-    tickLower,
-    tickUpper,
-    parsedAmountUsd.toString(),
-    parsedAmountUsd.toString(),
-    parsedAmountUsd.toString(),
-    wallet.address,
-    '0x'
-  );
-
+  const provider = wallet.provider;
+  const CHAIN_ID = 4663;
   const deadline = Math.floor(Date.now() / 1000) + 600;
+  const coder = ethers.AbiCoder.defaultAbiCoder();
+
+  // Step 1: Find tokenId minted in original tx to get pool key + tick range
+  const txHash = tx.tx_hash;
+  if (!txHash) throw new Error('No tx_hash in activity data');
+
+  const res = await fetch(`https://robinhoodchain.blockscout.com/api/v2/transactions/${txHash}/token-transfers?type=ERC-721`);
+  const data = await res.json();
+  const mintTransfer = data.items?.find(item =>
+    item.from?.hash === '0x0000000000000000000000000000000000000000' &&
+    item.token?.address_hash?.toLowerCase() === UNISWAP_V4_POSM_ADDRESS.toLowerCase()
+  );
+  if (!mintTransfer?.total?.token_id) throw new Error('Could not find minted position NFT in original tx');
+  const refTokenId = mintTransfer.total.token_id;
+
+  // Step 2: Get pool key and tick range from original position
+  const posm = new ethers.Contract(UNISWAP_V4_POSM_ADDRESS, UNISWAP_V4_POSM_ABI, provider);
+  const sv = new ethers.Contract(UNISWAP_V4_STATEVIEW_ADDRESS, STATEVIEW_ABI, provider);
+
+  const [pk, infoRaw] = await posm.getPoolAndPositionInfo(refTokenId);
+  const info = BigInt(infoRaw);
+  const tickLower = signed24(Number((info >> 8n) & 0xffffffn));
+  const tickUpper = signed24(Number((info >> 32n) & 0xffffffn));
+
+  // Step 3: Token metadata
+  let dec0 = 18, sym0 = 'TOKEN0', dec1 = 18, sym1 = 'TOKEN1';
+  const isC0Native = pk.currency0.toLowerCase() === ethers.ZeroAddress.toLowerCase();
+  const isC1Native = pk.currency1.toLowerCase() === ethers.ZeroAddress.toLowerCase();
+  if (!isC0Native) {
+    try { const c = new ethers.Contract(pk.currency0, ERC20_ABI, provider); [dec0, sym0] = await Promise.all([c.decimals().then(Number), c.symbol()]); } catch {}
+  }
+  if (!isC1Native) {
+    try { const c = new ethers.Contract(pk.currency1, ERC20_ABI, provider); [dec1, sym1] = await Promise.all([c.decimals().then(Number), c.symbol()]); } catch {}
+  }
+
+  // Step 4: Current pool state
+  const poolId = ethers.keccak256(coder.encode(
+    ['address', 'address', 'uint24', 'int24', 'address'],
+    [pk.currency0, pk.currency1, pk.fee, pk.tickSpacing, pk.hooks]
+  ));
+  const s0 = await sv.getSlot0(poolId);
+
+  // Step 5: Build Pool + Position from $amountUsd USDG
+  const cur0 = isC0Native ? Ether.onChain(CHAIN_ID) : new Token(CHAIN_ID, ethers.getAddress(pk.currency0), dec0, sym0);
+  const cur1 = isC1Native ? Ether.onChain(CHAIN_ID) : new Token(CHAIN_ID, ethers.getAddress(pk.currency1), dec1, sym1);
+  const pool = new Pool(cur0, cur1, Number(pk.fee), Number(pk.tickSpacing), pk.hooks, s0.sqrtPriceX96.toString(), '0', Number(s0.tick));
+
+  const isC0Usdg = pk.currency0.toLowerCase() === USDG_ADDRESS.toLowerCase();
+  const isC1Usdg = pk.currency1.toLowerCase() === USDG_ADDRESS.toLowerCase();
+  if (!isC0Usdg && !isC1Usdg) throw new Error('Neither token is USDG — cannot determine deposit amount');
+
+  const usdgRaw = ethers.parseUnits(amountUsd.toString(), 6).toString();
+  const position = isC1Usdg
+    ? Position.fromAmount1({ pool, tickLower, tickUpper, amount1: usdgRaw })
+    : Position.fromAmount0({ pool, tickLower, tickUpper, amount0: usdgRaw, useFullPrecision: false });
+
+  const { amount0: mint0, amount1: mint1 } = position.mintAmounts;
+  const amount0Max = (BigInt(mint0.toString()) * 101n / 100n).toString();
+  const amount1Max = (BigInt(mint1.toString()) * 101n / 100n).toString();
+
+  // Step 6: Permit2 approvals
+  const permit2 = new ethers.Contract(PERMIT2_ADDRESS, PERMIT2_ABI, wallet);
+  async function ensurePermit2(tokenAddr, amountMax) {
+    if (tokenAddr.toLowerCase() === ethers.ZeroAddress.toLowerCase()) return;
+    const erc20 = new ethers.Contract(tokenAddr, ERC20_ABI, wallet);
+    const erc20Allow = await erc20.allowance(wallet.address, PERMIT2_ADDRESS).catch(() => 0n);
+    if (erc20Allow < BigInt(amountMax)) {
+      await (await erc20.approve(PERMIT2_ADDRESS, ethers.MaxUint256)).wait();
+    }
+    const [p2Amount] = await permit2.allowance(wallet.address, tokenAddr, UNISWAP_V4_POSM_ADDRESS).catch(() => [0n]);
+    if (p2Amount < BigInt(amountMax)) {
+      await permit2.approve(tokenAddr, UNISWAP_V4_POSM_ADDRESS, BigInt(amountMax) * 2n, 2n ** 48n - 1n);
+    }
+  }
+  await ensurePermit2(pk.currency0, amount0Max);
+  await ensurePermit2(pk.currency1, amount1Max);
+
+  // Step 7: Mint position
+  const planner = new v4sdk.V4PositionPlanner();
+  planner.addMint(pool, tickLower, tickUpper, position.liquidity.toString(), amount0Max, amount1Max, wallet.address, '0x');
+  planner.addSettlePair(cur0, cur1);
   const unlockData = planner.finalize();
 
-  const posm = new ethers.Contract(UNISWAP_V4_POSM_ADDRESS, UNISWAP_V4_POSM_ABI, wallet);
-  const txResponse = await posm.modifyLiquidities(unlockData, deadline);
+  const posmWallet = new ethers.Contract(UNISWAP_V4_POSM_ADDRESS, UNISWAP_V4_POSM_ABI, wallet);
+  const txResponse = await posmWallet.modifyLiquidities(unlockData, deadline);
   const receipt = await txResponse.wait();
   return receipt.hash;
 }
 
 async function closePositionAndSwapToUsdg(tokenId) {
   const wallet = getWallet();
+  const provider = wallet.provider;
   const posm = new ethers.Contract(UNISWAP_V4_POSM_ADDRESS, UNISWAP_V4_POSM_ABI, wallet);
-
   const deadline = Math.floor(Date.now() / 1000) + 600;
+  const CHAIN_ID = 4663;
 
-  // Use V4PositionPlanner to burn & collect liquidity on V4
+  // Get pool key and tick range from position
+  const [pk, infoRaw] = await posm.getPoolAndPositionInfo(tokenId);
+
+  let dec0 = 18, sym0 = 'TOKEN0';
+  let dec1 = 18, sym1 = 'TOKEN1';
+  const isC0Native = pk.currency0.toLowerCase() === ethers.ZeroAddress.toLowerCase();
+  const isC1Native = pk.currency1.toLowerCase() === ethers.ZeroAddress.toLowerCase();
+
+  if (!isC0Native) {
+    try {
+      const c = new ethers.Contract(pk.currency0, ERC20_ABI, provider);
+      [dec0, sym0] = await Promise.all([c.decimals().then(Number), c.symbol()]);
+    } catch {}
+  }
+  if (!isC1Native) {
+    try {
+      const c = new ethers.Contract(pk.currency1, ERC20_ABI, provider);
+      [dec1, sym1] = await Promise.all([c.decimals().then(Number), c.symbol()]);
+    } catch {}
+  }
+
+  const cur0 = isC0Native ? Ether.onChain(CHAIN_ID) : new Token(CHAIN_ID, ethers.getAddress(pk.currency0), dec0, sym0);
+  const cur1 = isC1Native ? Ether.onChain(CHAIN_ID) : new Token(CHAIN_ID, ethers.getAddress(pk.currency1), dec1, sym1);
+
+  // Close LP position and withdraw underlying tokens to wallet.
+  // NOTE: addBurn (Actions.BURN_POSITION) hanya menghancurkan NFT LP position (ERC-721 tokenId),
+  //       BUKAN token ERC-20 underlying. Token0 & token1 di dalam posisi di-release ke PoolManager.
+  //       addTakePair (Actions.TAKE_PAIR) lalu mengirim underlying token0 + token1 ke wallet user.
+  //       Tidak ada token ERC-20 milik user yang dibakar/dihancurkan pada langkah ini.
   const planner = new v4sdk.V4PositionPlanner();
   planner.addBurn(tokenId, 0, 0, '0x');
+  planner.addTakePair(cur0, cur1, wallet.address);
   const unlockData = planner.finalize();
 
-  const txResponse = await posm.modifyLiquidities(unlockData, deadline);
+  const burnTx = await posm.modifyLiquidities(unlockData, deadline);
+  await burnTx.wait();
+
+  // Swap non-USDG token to USDG via Universal Router
+  const isC0Usdg = pk.currency0.toLowerCase() === USDG_ADDRESS.toLowerCase();
+  const isC1Usdg = pk.currency1.toLowerCase() === USDG_ADDRESS.toLowerCase();
+  if (isC0Usdg && isC1Usdg) return burnTx.hash;
+
+  const nonUsdgAddr = isC1Usdg ? pk.currency0 : pk.currency1;
+  const zeroForOne = isC1Usdg; // swap currency0→currency1 if c1 is USDG
+
+  const tokenContract = new ethers.Contract(nonUsdgAddr, ERC20_ABI, wallet);
+  const balance = await tokenContract.balanceOf(wallet.address);
+  if (balance === 0n) return burnTx.hash;
+
+  // Approve Universal Router to spend non-USDG token
+  const allowance = await tokenContract.allowance(wallet.address, UNIVERSAL_ROUTER_ADDRESS).catch(() => 0n);
+  if (allowance < balance) {
+    const approveTx = await tokenContract.approve(UNIVERSAL_ROUTER_ADDRESS, ethers.MaxUint256);
+    await approveTx.wait();
+  }
+
+  // Build V4 exact-in single-hop swap
+  const swapPlanner = new v4sdk.V4Planner();
+  swapPlanner.addAction(v4sdk.Actions.SWAP_EXACT_IN_SINGLE, [{
+    poolKey: { currency0: pk.currency0, currency1: pk.currency1, fee: pk.fee, tickSpacing: pk.tickSpacing, hooks: pk.hooks },
+    zeroForOne,
+    amountIn: balance,
+    amountOutMinimum: 0n,
+    hookData: '0x',
+  }]);
+  swapPlanner.addAction(v4sdk.Actions.SETTLE_ALL, [nonUsdgAddr, balance]);
+  swapPlanner.addAction(v4sdk.Actions.TAKE_ALL, [USDG_ADDRESS, 0n]);
+
+  const router = new ethers.Contract(UNIVERSAL_ROUTER_ADDRESS, UNIVERSAL_ROUTER_ABI, wallet);
+  const swapTx = await router.execute(V4_SWAP_COMMAND, [swapPlanner.finalize()], deadline);
+  const swapReceipt = await swapTx.wait();
+  return swapReceipt.hash;
+}
+
+async function ensurePermit2Allowance(wallet, tokenAddr, amountMax) {
+  if (tokenAddr.toLowerCase() === ethers.ZeroAddress.toLowerCase()) return;
+  const permit2 = new ethers.Contract(PERMIT2_ADDRESS, PERMIT2_ABI, wallet);
+  const erc20 = new ethers.Contract(tokenAddr, ERC20_ABI, wallet);
+  const erc20Allow = await erc20.allowance(wallet.address, PERMIT2_ADDRESS).catch(() => 0n);
+  if (erc20Allow < BigInt(amountMax)) {
+    await (await erc20.approve(PERMIT2_ADDRESS, ethers.MaxUint256)).wait();
+  }
+  const [p2Amount] = await permit2.allowance(wallet.address, tokenAddr, UNISWAP_V4_POSM_ADDRESS).catch(() => [0n]);
+  if (p2Amount < BigInt(amountMax)) {
+    await permit2.approve(tokenAddr, UNISWAP_V4_POSM_ADDRESS, BigInt(amountMax) * 2n, 2n ** 48n - 1n);
+  }
+}
+
+async function findUsdgPool(tokenAddress) {
+  if (!tokenAddress) throw new Error('tokenAddress required');
+  if (tokenAddress.toLowerCase() === USDG_ADDRESS.toLowerCase()) {
+    throw new Error('Cannot deploy USDG/USDG pool — address is USDG itself');
+  }
+
+  const provider = getProvider();
+  const sv = new ethers.Contract(UNISWAP_V4_STATEVIEW_ADDRESS, STATEVIEW_ABI, provider);
+  const coder = ethers.AbiCoder.defaultAbiCoder();
+
+  const tokenAddr = ethers.getAddress(tokenAddress);
+  const usdgAddr = ethers.getAddress(USDG_ADDRESS);
+  const [currency0, currency1] = tokenAddr.toLowerCase() < usdgAddr.toLowerCase()
+    ? [tokenAddr, usdgAddr]
+    : [usdgAddr, tokenAddr];
+  const isC0Usdg = currency0.toLowerCase() === usdgAddr.toLowerCase();
+  const isC1Usdg = currency1.toLowerCase() === usdgAddr.toLowerCase();
+
+  // Fetch token metadata once (USDG hardcoded: 6 decimals)
+  let tokenDec = 18, tokenSym = 'TOKEN';
+  try {
+    const c = new ethers.Contract(tokenAddr, ERC20_ABI, provider);
+    [tokenDec, tokenSym] = await Promise.all([c.decimals().then(Number), c.symbol()]);
+  } catch {}
+  const dec0 = isC0Usdg ? 6 : tokenDec;
+  const dec1 = isC1Usdg ? 6 : tokenDec;
+  const sym0 = isC0Usdg ? 'USDG' : tokenSym;
+  const sym1 = isC1Usdg ? 'USDG' : tokenSym;
+
+  // Iterate standard fee tiers with hooks=0x0
+  for (const { fee, tickSpacing } of STANDARD_FEE_TIERS) {
+    const poolId = ethers.keccak256(coder.encode(
+      ['address', 'address', 'uint24', 'int24', 'address'],
+      [currency0, currency1, fee, tickSpacing, HOOKS_ZERO]
+    ));
+    try {
+      const s0 = await sv.getSlot0(poolId);
+      if (s0.sqrtPriceX96 > 0n) {
+        return {
+          pk: { currency0, currency1, fee, tickSpacing, hooks: HOOKS_ZERO },
+          poolId,
+          sqrtPriceX96: s0.sqrtPriceX96.toString(),
+          tick: Number(s0.tick),
+          dec0, dec1, sym0, sym1, isC0Usdg, isC1Usdg,
+        };
+      }
+    } catch {}
+  }
+
+  // Fallback: DexScreener for pools with custom hooks / non-standard fee tiers
+  try {
+    const ds = await rpcDecoder.fetchDexScreenerLiquidity(tokenAddr);
+    const dsQuoteUsdg = ds && ((ds.baseSymbol || '').toUpperCase() === 'USDG' || (ds.quoteSymbol || '').toUpperCase() === 'USDG');
+    if (dsQuoteUsdg) {
+      // DexScreener doesn't expose V4 poolKey directly; still return metadata so caller can surface a helpful message.
+      // Best-effort: caller may treat this as "pool exists elsewhere but not accessible via standard fee tiers".
+    }
+  } catch {}
+
+  return null;
+}
+
+// Returns ALL active USDG pools for a token across standard fee tiers, with TVL estimate.
+async function findAllUsdgPools(tokenAddress) {
+  if (!tokenAddress) throw new Error('tokenAddress required');
+  if (tokenAddress.toLowerCase() === USDG_ADDRESS.toLowerCase()) {
+    throw new Error('Cannot deploy USDG/USDG pool — address is USDG itself');
+  }
+
+  const provider = getProvider();
+  const sv = new ethers.Contract(UNISWAP_V4_STATEVIEW_ADDRESS, STATEVIEW_ABI, provider);
+  const coder = ethers.AbiCoder.defaultAbiCoder();
+
+  const tokenAddr = ethers.getAddress(tokenAddress);
+  const usdgAddr = ethers.getAddress(USDG_ADDRESS);
+  const [currency0, currency1] = tokenAddr.toLowerCase() < usdgAddr.toLowerCase()
+    ? [tokenAddr, usdgAddr]
+    : [usdgAddr, tokenAddr];
+  const isC0Usdg = currency0.toLowerCase() === usdgAddr.toLowerCase();
+  const isC1Usdg = !isC0Usdg;
+
+  let tokenDec = 18, tokenSym = 'TOKEN';
+  try {
+    const c = new ethers.Contract(tokenAddr, ERC20_ABI, provider);
+    [tokenDec, tokenSym] = await Promise.all([c.decimals().then(Number), c.symbol()]);
+  } catch {}
+
+  const dec0 = isC0Usdg ? 6 : tokenDec;
+  const dec1 = isC1Usdg ? 6 : tokenDec;
+  const sym0 = isC0Usdg ? 'USDG' : tokenSym;
+  const sym1 = isC1Usdg ? 'USDG' : tokenSym;
+
+  const pools = [];
+
+  for (const { fee, tickSpacing } of STANDARD_FEE_TIERS) {
+    const poolId = ethers.keccak256(coder.encode(
+      ['address', 'address', 'uint24', 'int24', 'address'],
+      [currency0, currency1, fee, tickSpacing, HOOKS_ZERO]
+    ));
+    try {
+      const s0 = await sv.getSlot0(poolId);
+      if (s0.sqrtPriceX96 > 0n) {
+        // Estimate TVL from active liquidity:
+        //   For TOKEN/USDG (USDG = c1, dec=6): TVL ≈ 2 × L × sqrtP / 1e6
+        //   For USDG/TOKEN (USDG = c0, dec=6): TVL ≈ 2 × L / sqrtP / 1e6
+        let tvlUsd = 0;
+        try {
+          const totalLiq = await sv.getLiquidity(poolId);
+          if (totalLiq > 0n) {
+            const liqNum = Number(totalLiq);
+            const sqrtP = Number(s0.sqrtPriceX96) / Math.pow(2, 96);
+            tvlUsd = isC1Usdg
+              ? 2 * liqNum * sqrtP / 1e6
+              : 2 * liqNum / sqrtP / 1e6;
+          }
+        } catch {}
+
+        pools.push({
+          pk: { currency0, currency1, fee, tickSpacing, hooks: HOOKS_ZERO },
+          poolId,
+          sqrtPriceX96: s0.sqrtPriceX96.toString(),
+          tick: Number(s0.tick),
+          dec0, dec1, sym0, sym1, isC0Usdg, isC1Usdg,
+          tvlUsd,
+        });
+      }
+    } catch {}
+  }
+
+  return pools;
+}
+
+// Re-fetch current sqrtPriceX96 + tick for a specific pool (for price refresh)
+async function getPoolSlot0(poolId) {
+  const provider = getWallet().provider;
+  const sv = new ethers.Contract(UNISWAP_V4_STATEVIEW_ADDRESS, STATEVIEW_ABI, provider);
+  const s0 = await sv.getSlot0(poolId);
+  if (!s0 || s0.sqrtPriceX96 === 0n) throw new Error('Pool tidak aktif atau tidak ditemukan');
+  return {
+    sqrtPriceX96: s0.sqrtPriceX96.toString(),
+    tick: Number(s0.tick),
+  };
+}
+
+async function executeAutoDeployLp(tokenAddress, amountUsd = 50, preFoundPool = null, rangePct = 20) {
+  const wallet = getWallet();
+  const provider = wallet.provider;
+  const CHAIN_ID = 4663;
+  const deadline = Math.floor(Date.now() / 1000) + 600;
+
+  const poolInfo = preFoundPool || await findUsdgPool(tokenAddress);
+  if (!poolInfo) throw new Error(`No USDG pool found for ${tokenAddress} across standard V4 fee tiers`);
+
+  const { pk, sqrtPriceX96, tick, dec0, dec1, sym0, sym1, isC0Usdg, isC1Usdg } = poolInfo;
+  const tickSpacing = Number(pk.tickSpacing);
+
+  // Check USDG balance
+  const usdgContract = new ethers.Contract(USDG_ADDRESS, ERC20_ABI, provider);
+  const usdgBalance = await usdgContract.balanceOf(wallet.address);
+  const usdgNeeded = ethers.parseUnits(amountUsd.toString(), 6);
+  if (usdgBalance < usdgNeeded) {
+    throw new Error(`Insufficient USDG balance: have ${ethers.formatUnits(usdgBalance, 6)}, need ${amountUsd}`);
+  }
+
+  // One-side lower tick range: tickLower = price is (rangePct)% below current price
+  // Formula: tickDiff = floor( log(1 - rangePct/100) / log(1.0001) / tickSpacing ) * tickSpacing
+  const alignDown = (t, ts) => Math.floor(t / ts) * ts;
+  const minTickAligned = Math.ceil(MIN_TICK / tickSpacing) * tickSpacing;
+  const maxTickAligned = Math.floor(MAX_TICK / tickSpacing) * tickSpacing;
+  let tickUpper = alignDown(tick, tickSpacing);
+  const ratio = 1 - rangePct / 100;
+  const rawTickDiff = Math.log(ratio) / Math.log(1.0001); // negative number
+  const alignedTickDiff = Math.floor(rawTickDiff / tickSpacing) * tickSpacing;
+  let tickLower = tickUpper + alignedTickDiff;
+  tickLower = Math.max(tickLower, minTickAligned);
+  tickUpper = Math.min(tickUpper, maxTickAligned);
+  if (tickLower >= tickUpper) {
+    throw new Error(`Invalid tick range: lower=${tickLower} upper=${tickUpper}`);
+  }
+
+  // Build Pool + Position
+  const isC0Native = pk.currency0.toLowerCase() === ethers.ZeroAddress.toLowerCase();
+  const isC1Native = pk.currency1.toLowerCase() === ethers.ZeroAddress.toLowerCase();
+  const cur0 = isC0Native ? Ether.onChain(CHAIN_ID) : new Token(CHAIN_ID, ethers.getAddress(pk.currency0), dec0, sym0);
+  const cur1 = isC1Native ? Ether.onChain(CHAIN_ID) : new Token(CHAIN_ID, ethers.getAddress(pk.currency1), dec1, sym1);
+  const pool = new Pool(cur0, cur1, Number(pk.fee), tickSpacing, pk.hooks, sqrtPriceX96, '0', tick);
+
+  // One-side lower → range fully below current tick → position is 100% currency1 (if USDG=c1) or 100% currency0 (if USDG=c0)
+  const usdgRaw = usdgNeeded.toString();
+  const position = isC1Usdg
+    ? Position.fromAmount1({ pool, tickLower, tickUpper, amount1: usdgRaw })
+    : Position.fromAmount0({ pool, tickLower, tickUpper, amount0: usdgRaw, useFullPrecision: false });
+
+  const { amount0: mint0, amount1: mint1 } = position.mintAmounts;
+  const amount0Max = (BigInt(mint0.toString()) * 101n / 100n).toString();
+  const amount1Max = (BigInt(mint1.toString()) * 101n / 100n).toString();
+
+  await ensurePermit2Allowance(wallet, pk.currency0, amount0Max);
+  await ensurePermit2Allowance(wallet, pk.currency1, amount1Max);
+
+  const planner = new v4sdk.V4PositionPlanner();
+  planner.addMint(pool, tickLower, tickUpper, position.liquidity.toString(), amount0Max, amount1Max, wallet.address, '0x');
+  planner.addSettlePair(cur0, cur1);
+  const unlockData = planner.finalize();
+
+  const posmWallet = new ethers.Contract(UNISWAP_V4_POSM_ADDRESS, UNISWAP_V4_POSM_ABI, wallet);
+  const txResponse = await posmWallet.modifyLiquidities(unlockData, deadline);
   const receipt = await txResponse.wait();
-  return receipt.hash;
+  return {
+    hash: receipt.hash,
+    fee: Number(pk.fee),
+    tickSpacing,
+    tickLower,
+    tickUpper,
+    tokenSymbol: isC0Usdg ? sym1 : sym0,
+  };
 }
 
 module.exports = {
@@ -535,4 +934,8 @@ module.exports = {
   getExecutorPositions,
   executeCopyAddLiquidity,
   closePositionAndSwapToUsdg,
+  findUsdgPool,
+  findAllUsdgPools,
+  getPoolSlot0,
+  executeAutoDeployLp,
 };
