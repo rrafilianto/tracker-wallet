@@ -69,8 +69,11 @@ function findWallet(addr) {
 async function enrichLiquidityEvents(list, wallet) {
   for (const tx of list) {
     const eventType = (tx.event_type || '').toLowerCase();
-    if ((eventType === 'add' || eventType === 'remove') && (!tx.token_amount || Number(tx.token_amount) === 0)) {
+    if ((eventType === 'add' || eventType === 'remove') && tx.tx_hash) {
       try {
+        const liqDetails = await uniswapExecutor.getLiquidityTxDetails(tx.tx_hash, wallet.address);
+        if (liqDetails) tx.liqDetails = liqDetails;
+
         const transfers = await rpcDecoder.getLiquidityTransfers(wallet.chain, tx.tx_hash, wallet.address);
         if (transfers && transfers.length > 0) {
           tx.decodedTransfers = transfers;

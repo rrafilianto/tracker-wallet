@@ -117,59 +117,75 @@ function formatTx(activity, wallet) {
 
     // Detail khusus untuk Add / Remove Liquidity
     if (isLiq) {
-      const quoteSymbol =
-        tx.quote_token?.symbol || tx.quote_symbol || tx.pair_symbol;
-      const quoteAmt = tx.quote_token_amount || tx.quote_amount;
-      const hasTokenAmt = amount && Number(tokenAmt) > 0;
-      const hasQuoteAmt = quoteAmt && Number(quoteAmt) > 0;
-
       const actionText = eventType === 'add' ? 'Deposit' : 'Withdraw';
 
-      if (tx.decodedTransfers && tx.decodedTransfers.length > 0) {
-        tx.decodedTransfers.forEach((tr) => {
-          let trSymbol = tr.symbol;
-          if (!trSymbol) {
-            const addrLower = (tr.tokenAddress || '').toLowerCase();
-            if (addrLower === tx.token?.address?.toLowerCase())
-              trSymbol = symbol;
-            else if (addrLower === tx.quote_token?.token_address?.toLowerCase())
-              trSymbol = quoteSymbol;
-            else trSymbol = shortAddr(tr.tokenAddress);
-          }
-          const displayAmt =
-            tr.amount !== undefined
-              ? tr.amount >= 1000
-                ? formatCompactNumber(tr.amount)
-                : tr.amount.toFixed(4)
-              : tr.rawValue
-                ? formatCompactNumber(tr.rawValue)
-                : '';
-          lines.push(`   ${actionText} ${trSymbol}: ${displayAmt}`);
-        });
-      } else if (tx.dexScreenerInfo) {
-        const ds = tx.dexScreenerInfo;
-        if (ds.baseAmount && ds.quoteAmount) {
-          lines.push(
-            `   Pool Liquidity: ${Number(ds.baseAmount).toLocaleString()} ${ds.baseSymbol} + ${Number(ds.quoteAmount).toLocaleString()} ${ds.quoteSymbol}`,
-          );
-          if (ds.usdValue)
-            lines.push(
-              `   Pool Value: $${Number(ds.usdValue).toLocaleString()}`,
-            );
-        } else if (quoteSymbol) {
-          lines.push(`   Pair: ${symbol}/${quoteSymbol}`);
-        }
+      if (tx.liqDetails) {
+        const d = tx.liqDetails;
+        const statusBadge = d.inRange ? '🟢 In Range' : '🔴 Out of Range';
+        const depUsdStr = d.depTotalUsd > 0 ? ` (~$${d.depTotalUsd.toFixed(2)} USD)` : '';
+        const dep0Str = formatCompactNumber(d.depAmount0);
+        const dep1Str = formatCompactNumber(d.depAmount1);
+        const depTokens = (d.depAmount0 > 0 || d.depAmount1 > 0)
+          ? `${dep0Str} ${d.symbol0} + ${dep1Str} ${d.symbol1}`
+          : `${d.pair}`;
+
+        lines.push(`   • <b>Protocol:</b> ${d.protocolBadge} ${d.protocolName}`);
+        lines.push(`   • <b>Pair:</b> ${d.pair} (${d.feePct}%)`);
+        lines.push(`   • <b>${actionText}:</b> ${depTokens}${depUsdStr}`);
+        lines.push(`   • <b>Price Range:</b> ${d.rangeStr} (now ${d.priceNow}) ${statusBadge}`);
       } else {
-        if (hasTokenAmt) {
-          lines.push(`   ${actionText} ${symbol}: ${amount}`);
-        }
-        if (hasQuoteAmt && quoteSymbol) {
-          lines.push(
-            `   ${actionText} ${quoteSymbol}: ${Number(quoteAmt).toFixed(4)}`,
-          );
-        }
-        if (!hasTokenAmt && !hasQuoteAmt && quoteSymbol) {
-          lines.push(`   Pair: ${symbol}/${quoteSymbol}`);
+        const quoteSymbol =
+          tx.quote_token?.symbol || tx.quote_symbol || tx.pair_symbol;
+        const quoteAmt = tx.quote_token_amount || tx.quote_amount;
+        const hasTokenAmt = amount && Number(tokenAmt) > 0;
+        const hasQuoteAmt = quoteAmt && Number(quoteAmt) > 0;
+
+        if (tx.decodedTransfers && tx.decodedTransfers.length > 0) {
+          tx.decodedTransfers.forEach((tr) => {
+            let trSymbol = tr.symbol;
+            if (!trSymbol) {
+              const addrLower = (tr.tokenAddress || '').toLowerCase();
+              if (addrLower === tx.token?.address?.toLowerCase())
+                trSymbol = symbol;
+              else if (addrLower === tx.quote_token?.token_address?.toLowerCase())
+                trSymbol = quoteSymbol;
+              else trSymbol = shortAddr(tr.tokenAddress);
+            }
+            const displayAmt =
+              tr.amount !== undefined
+                ? tr.amount >= 1000
+                  ? formatCompactNumber(tr.amount)
+                  : tr.amount.toFixed(4)
+                : tr.rawValue
+                  ? formatCompactNumber(tr.rawValue)
+                  : '';
+            lines.push(`   ${actionText} ${trSymbol}: ${displayAmt}`);
+          });
+        } else if (tx.dexScreenerInfo) {
+          const ds = tx.dexScreenerInfo;
+          if (ds.baseAmount && ds.quoteAmount) {
+            lines.push(
+              `   Pool Liquidity: ${Number(ds.baseAmount).toLocaleString()} ${ds.baseSymbol} + ${Number(ds.quoteAmount).toLocaleString()} ${ds.quoteSymbol}`,
+            );
+            if (ds.usdValue)
+              lines.push(
+                `   Pool Value: $${Number(ds.usdValue).toLocaleString()}`,
+              );
+          } else if (quoteSymbol) {
+            lines.push(`   Pair: ${symbol}/${quoteSymbol}`);
+          }
+        } else {
+          if (hasTokenAmt) {
+            lines.push(`   ${actionText} ${symbol}: ${amount}`);
+          }
+          if (hasQuoteAmt && quoteSymbol) {
+            lines.push(
+              `   ${actionText} ${quoteSymbol}: ${Number(quoteAmt).toFixed(4)}`,
+            );
+          }
+          if (!hasTokenAmt && !hasQuoteAmt && quoteSymbol) {
+            lines.push(`   Pair: ${symbol}/${quoteSymbol}`);
+          }
         }
       }
 

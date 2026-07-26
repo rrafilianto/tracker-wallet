@@ -1685,6 +1685,120 @@ async function executeAutoDeployLpV3(tokenAddress, amountUsd, preFoundPool, rang
   };
 }
 
+// Fetch liquidity transaction details (V3 or V4) for tracking activity alerts
+async function getLiquidityTxDetails(txHash, walletAddress) {
+  if (!txHash || !walletAddress) return null;
+
+  try {
+    const res = await fetch(`https://robinhoodchain.blockscout.com/api/v2/transactions/${txHash}/token-transfers?type=ERC-721`);
+    const data = await res.json();
+    if (!data.items || data.items.length === 0) return null;
+
+    const walletLower = walletAddress.toLowerCase();
+    const nftItem = data.items.find(item =>
+      (item.to?.hash?.toLowerCase() === walletLower || item.from?.hash === '0x0000000000000000000000000000000000000000') &&
+      item.total?.token_id
+    );
+
+    if (!nftItem) return null;
+
+    const contractAddr = (nftItem.token?.address_hash || '').toLowerCase();
+    const tokenId = nftItem.total.token_id.toString();
+
+    if (contractAddr === UNISWAP_V3_POSM_ADDRESS.toLowerCase()) {
+      const v3Detail = await getV3PositionDetails(tokenId, walletAddress);
+      if (!v3Detail) return null;
+
+      const { depAmount0, depAmount1, depTotalUsd } = await fetchMintDeposit(
+        txHash, walletAddress, null, null,
+        v3Detail.dec0, v3Detail.dec1, 0n, v3Detail.sym0, v3Detail.sym1
+      );
+
+      const feePctStr = (v3Detail.feePct * 100).toFixed(2);
+      const pair = `${v3Detail.sym0}/${v3Detail.sym1}`;
+      const rangeStr = `${formatPriceCompact(v3Detail.priceMin)}–${formatPriceCompact(v3Detail.priceMax)}`;
+      const priceNowStr = formatPriceCompact(v3Detail.priceNow);
+
+      return {
+        protocol: 'v3',
+        protocolBadge: '🔷',
+        protocolName: 'Uniswap V3',
+        tokenId,
+        feePct: feePctStr,
+        pair,
+        symbol0: v3Detail.sym0,
+        symbol1: v3Detail.sym1,
+        depAmount0: depAmount0 || v3Detail.amount0,
+        depAmount1: depAmount1 || v3Detail.amount1,
+        depTotalUsd: depTotalUsd || v3Detail.valueUsd,
+        rangeStr,
+        priceNow: priceNowStr,
+        inRange: v3Detail.inRange,
+      };
+    } else if (contractAddr === UNISWAP_V4_POSM_ADDRESS.toLowerCase()) {
+      const v4Detail = await getV4PositionDetails(tokenId, walletAddress);
+      if (!v4Detail) return null;
+
+      const { depAmount0, depAmount1, depTotalUsd } = await fetchMintDeposit(
+        txHash, walletAddress, null, null,
+        v4Detail.dec0, v4Detail.dec1, 0n, v4Detail.sym0, v4Detail.sym1
+      );
+
+      const feePctStr = (v4Detail.feePct * 100).toFixed(2);
+      const pair = `${v4Detail.sym0}/${v4Detail.sym1}`;
+
+      const tickLower   = Number(v4Detail.tickLower);
+      const tickUpper   = Number(v4Detail.tickUpper);
+      const tickCurrent = Number(v4Detail.tickCurrent);
+      const inRange     = tickCurrent >= tickLower && tickCurrent <= tickUpper;
+
+      let priceA = 0, priceB = 0, priceNow = 0;
+      const sqrtP  = Number(v4Detail.sqrtPriceX96) / Math.pow(2, 96);
+      const rawNow = sqrtP * sqrtP;
+
+      if (v4Detail.isC0Usdg) {
+        priceA   = Math.pow(10, v4Detail.dec1 - 6) / Math.pow(1.0001, tickLower);
+        priceB   = Math.pow(10, v4Detail.dec1 - 6) / Math.pow(1.0001, tickUpper);
+        priceNow = Math.pow(10, v4Detail.dec1 - 6) / rawNow;
+      } else if (v4Detail.isC1Usdg) {
+        priceA   = Math.pow(1.0001, tickLower) * Math.pow(10, v4Detail.dec0 - 6);
+        priceB   = Math.pow(1.0001, tickUpper) * Math.pow(10, v4Detail.dec0 - 6);
+        priceNow = rawNow * Math.pow(10, v4Detail.dec0 - 6);
+      } else {
+        priceA   = Math.pow(1.0001, tickLower) * Math.pow(10, v4Detail.dec0 - v4Detail.dec1);
+        priceB   = Math.pow(1.0001, tickUpper) * Math.pow(10, v4Detail.dec0 - v4Detail.dec1);
+        priceNow = rawNow * Math.pow(10, v4Detail.dec0 - v4Detail.dec1);
+      }
+
+      const priceMin = Math.min(priceA, priceB);
+      const priceMax = Math.max(priceA, priceB);
+
+      const rangeStr = `${formatPriceCompact(priceMin)}–${formatPriceCompact(priceMax)}`;
+      const priceNowStr = formatPriceCompact(priceNow);
+
+      return {
+        protocol: 'v4',
+        protocolBadge: '🔶',
+        protocolName: 'Uniswap V4',
+        tokenId,
+        feePct: feePctStr,
+        pair,
+        symbol0: v4Detail.sym0,
+        symbol1: v4Detail.sym1,
+        depAmount0,
+        depAmount1,
+        depTotalUsd,
+        rangeStr,
+        priceNow: priceNowStr,
+        inRange,
+      };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 module.exports = {
   getExecutorAddress,
   getExecutorBalance,
@@ -1701,4 +1815,5 @@ module.exports = {
   executeAutoDeployLpV3,
   ensureQuoteTokenBalance,
   getV3PositionDetails,
+  getLiquidityTxDetails,
 };
