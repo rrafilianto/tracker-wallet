@@ -553,8 +553,18 @@ bot.on('callback_query', async (query) => {
     await bot.answerCallbackQuery(query.id, { text: `⏳ Closing Position #${tokenId} & Swapping to USDG...` });
     try {
       await send(cid, `⏳ <b>Closing Position #${tokenId} & Swapping non-USDG tokens to USDG…</b>`);
-      const txHash = await uniswapExecutor.closePositionAndSwapToUsdg(tokenId);
-      await send(cid, `✅ <b>Position #${tokenId} Closed Successfully!</b>\nTokens swapped to USDG.\nTx: https://robinhoodchain.blockscout.com/tx/${txHash}`);
+      const res = await uniswapExecutor.closePositionAndSwapToUsdg(tokenId);
+      
+      let msg = `✅ <b>Position #${tokenId} Closed Successfully!</b>\n\n`;
+      msg += `🔹 <b>Close LP Tx:</b> https://robinhoodchain.blockscout.com/tx/${res.closeTxHash}\n`;
+      if (res.swapTxHash) {
+        msg += `🔄 <b>Swap Tx:</b> https://robinhoodchain.blockscout.com/tx/${res.swapTxHash}\n\n`;
+        msg += `Tokens swapped to USDG.`;
+      } else {
+        msg += `\n(Position was 100% USDG — no swap needed)`;
+      }
+
+      await send(cid, msg);
     } catch (e) {
       await send(cid, `❌ Failed to close position #${tokenId}: ${e.message}`);
     }
@@ -664,11 +674,16 @@ bot.on('callback_query', async (query) => {
       const result = await uniswapExecutor.executeAutoDeployLp(selection.tokenAddr, amount, poolInfo, rangePct);
       pendingPoolSelections.delete(shortKey);
 
+      const isInvalidPrice = result.priceMin >= 1e12 || result.priceMax >= 1e12 || result.priceNow >= 1e12;
+      const rangeStr = (result.priceMin !== undefined && result.priceMax !== undefined && !isInvalidPrice)
+        ? `${formatPriceCompact(result.priceMin)}–${formatPriceCompact(result.priceMax)} (now ${formatPriceCompact(result.priceNow)})`
+        : `${result.tickLower} → ${result.tickUpper}`;
+
       await send(cid,
         `✅ <b>LP Deployed Successfully!</b>\n` +
         `Pair: <b>${result.tokenSymbol}/USDG</b>\n` +
         `Fee Tier: <b>${(result.fee / 10000).toFixed(2)}%</b>\n` +
-        `Range: <b>${result.tickLower} → ${result.tickUpper}</b>\n` +
+        `Range: <b>${rangeStr}</b>\n` +
         `Tx: https://robinhoodchain.blockscout.com/tx/${result.hash}`
       );
     } catch (e) {

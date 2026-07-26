@@ -4,12 +4,19 @@ const v4sdk = require('@uniswap/v4-sdk');
 const { Pool, Position } = v4sdk;
 const rpcDecoder = require('./rpc-decoder');
 
-// Standard Uniswap V4 fee tier → tickSpacing mapping (hooks = 0x0 default)
-const STANDARD_FEE_TIERS = [
-  { fee: 100, tickSpacing: 1 },
-  { fee: 500, tickSpacing: 10 },
-  { fee: 3000, tickSpacing: 60 },
-  { fee: 10000, tickSpacing: 200 },
+// Uniswap V4 fee tiers (supports any fee tier, including >1% fees: 2%, 3%, 5%, 10%)
+const ALL_FEE_TIERS = [
+  { fee: 100, tickSpacing: 1 },       // 0.01%
+  { fee: 500, tickSpacing: 10 },      // 0.05%
+  { fee: 1000, tickSpacing: 10 },     // 0.10%
+  { fee: 2000, tickSpacing: 20 },     // 0.20%
+  { fee: 3000, tickSpacing: 60 },     // 0.30%
+  { fee: 5000, tickSpacing: 60 },     // 0.50%
+  { fee: 10000, tickSpacing: 200 },   // 1.00%
+  { fee: 20000, tickSpacing: 200 },   // 2.00%
+  { fee: 30000, tickSpacing: 200 },   // 3.00%
+  { fee: 50000, tickSpacing: 200 },   // 5.00%
+  { fee: 100000, tickSpacing: 200 },  // 10.00%
 ];
 const MIN_TICK = -887272;
 const MAX_TICK = 887272;
@@ -662,14 +669,18 @@ async function closePositionAndSwapToUsdg(tokenId) {
   // Swap non-USDG token to USDG via Universal Router
   const isC0Usdg = pk.currency0.toLowerCase() === USDG_ADDRESS.toLowerCase();
   const isC1Usdg = pk.currency1.toLowerCase() === USDG_ADDRESS.toLowerCase();
-  if (isC0Usdg && isC1Usdg) return burnTx.hash;
+  if (isC0Usdg && isC1Usdg) {
+    return { closeTxHash: burnTx.hash, swapTxHash: null };
+  }
 
   const nonUsdgAddr = isC1Usdg ? pk.currency0 : pk.currency1;
   const zeroForOne = isC1Usdg; // swap currency0→currency1 if c1 is USDG
 
   const tokenContract = new ethers.Contract(nonUsdgAddr, ERC20_ABI, wallet);
   const balance = await tokenContract.balanceOf(wallet.address);
-  if (balance === 0n) return burnTx.hash;
+  if (balance === 0n) {
+    return { closeTxHash: burnTx.hash, swapTxHash: null };
+  }
 
   // Approve Universal Router to spend non-USDG token
   const allowance = await tokenContract.allowance(wallet.address, UNIVERSAL_ROUTER_ADDRESS).catch(() => 0n);
@@ -693,7 +704,10 @@ async function closePositionAndSwapToUsdg(tokenId) {
   const router = new ethers.Contract(UNIVERSAL_ROUTER_ADDRESS, UNIVERSAL_ROUTER_ABI, wallet);
   const swapTx = await router.execute(V4_SWAP_COMMAND, [swapPlanner.finalize()], deadline);
   const swapReceipt = await swapTx.wait();
-  return swapReceipt.hash;
+  return {
+    closeTxHash: burnTx.hash,
+    swapTxHash: swapReceipt.hash,
+  };
 }
 
 async function ensurePermit2Allowance(wallet, tokenAddr, amountMax) {
@@ -739,8 +753,8 @@ async function findUsdgPool(tokenAddress) {
   const sym0 = isC0Usdg ? 'USDG' : tokenSym;
   const sym1 = isC1Usdg ? 'USDG' : tokenSym;
 
-  // Iterate standard fee tiers with hooks=0x0
-  for (const { fee, tickSpacing } of STANDARD_FEE_TIERS) {
+  // Iterate fee tiers (0.01% up to 10.00%) with hooks=0x0
+  for (const { fee, tickSpacing } of ALL_FEE_TIERS) {
     const poolId = ethers.keccak256(coder.encode(
       ['address', 'address', 'uint24', 'int24', 'address'],
       [currency0, currency1, fee, tickSpacing, HOOKS_ZERO]
@@ -772,7 +786,7 @@ async function findUsdgPool(tokenAddress) {
   return null;
 }
 
-// Returns ALL active USDG pools for a token across standard fee tiers, with TVL estimate.
+// Returns ALL active USDG pools for a token across all fee tiers (0.01% - 10.00%), sorted by TVL descending.
 async function findAllUsdgPools(tokenAddress) {
   if (!tokenAddress) throw new Error('tokenAddress required');
   if (tokenAddress.toLowerCase() === USDG_ADDRESS.toLowerCase()) {
@@ -804,7 +818,7 @@ async function findAllUsdgPools(tokenAddress) {
 
   const pools = [];
 
-  for (const { fee, tickSpacing } of STANDARD_FEE_TIERS) {
+  for (const { fee, tickSpacing } of ALL_FEE_TIERS) {
     const poolId = ethers.keccak256(coder.encode(
       ['address', 'address', 'uint24', 'int24', 'address'],
       [currency0, currency1, fee, tickSpacing, HOOKS_ZERO]
@@ -838,6 +852,9 @@ async function findAllUsdgPools(tokenAddress) {
       }
     } catch {}
   }
+
+  // Sort pools by TVL in descending order (highest TVL pool first)
+  pools.sort((a, b) => b.tvlUsd - a.tvlUsd);
 
   return pools;
 }
@@ -935,6 +952,17 @@ async function executeAutoDeployLp(tokenAddress, amountUsd = 50, preFoundPool = 
   const posmWallet = new ethers.Contract(UNISWAP_V4_POSM_ADDRESS, UNISWAP_V4_POSM_ABI, wallet);
   const txResponse = await posmWallet.modifyLiquidities(unlockData, deadline);
   const receipt = await txResponse.wait();
+  const priceAtLower = tickToTokenPrice(tickLower, dec0, dec1, isC0Usdg);
+  const priceAtUpper = tickToTokenPrice(tickUpper, dec0, dec1, isC0Usdg);
+  const priceMin = Math.min(priceAtLower, priceAtUpper);
+  const priceMax = Math.max(priceAtLower, priceAtUpper);
+
+  const sqrtP = Number(sqrtPriceX96) / Math.pow(2, 96);
+  const rawNow = sqrtP * sqrtP;
+  const priceNow = isC0Usdg
+    ? Math.pow(10, dec1 - 6) / rawNow
+    : rawNow * Math.pow(10, dec0 - 6);
+
   return {
     hash: receipt.hash,
     fee: Number(pk.fee),
@@ -942,6 +970,9 @@ async function executeAutoDeployLp(tokenAddress, amountUsd = 50, preFoundPool = 
     tickLower,
     tickUpper,
     tokenSymbol: isC0Usdg ? sym1 : sym0,
+    priceMin,
+    priceMax,
+    priceNow,
   };
 }
 
