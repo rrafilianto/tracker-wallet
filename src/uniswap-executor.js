@@ -48,17 +48,17 @@ const ERC20_ABI = [
   'function allowance(address owner, address spender) view returns (uint256)'
 ];
 
-// Addresses on Robinhood Chain
-const UNISWAP_V4_POSM_ADDRESS       = process.env.UNISWAP_V4_POSM_ADDRESS       || '0x58daec3116aae6D93017bAAea7749052E8a04fA7';
-const UNISWAP_V4_STATEVIEW_ADDRESS  = process.env.UNISWAP_V4_STATEVIEW_ADDRESS  || '0xF3334192D15450CdD385c8B70e03f9A6bD9E673b';
-const USDG_ADDRESS                  = process.env.USDG_ADDRESS                  || '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168';
-const UNIVERSAL_ROUTER_ADDRESS      = process.env.UNIVERSAL_ROUTER_ADDRESS      || '0x8876789976deCbFcbBBe364623C63652dB8c0904';
-const PERMIT2_ADDRESS               = process.env.PERMIT2_ADDRESS               || '0x000000000022D473030F116dDEE9F6B43aC78BA3';
-// WETH resmi di Robinhood Chain (bukan 0x4200..., yang bukan contract)
-const WETH_ADDRESS                  = process.env.WETH_ADDRESS                  || '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73';
-// Uniswap V3 contracts (verified via Blockscout)
-const UNISWAP_V3_FACTORY_ADDRESS    = process.env.UNISWAP_V3_FACTORY_ADDRESS    || '0x1f7d7550B1b028f7571E69A784071F0205FD2EfA';
-const UNISWAP_V3_POSM_ADDRESS       = process.env.UNISWAP_V3_POSM_ADDRESS       || '0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3';
+const safeAddr = (addr) => (addr ? ethers.getAddress(addr.toString().toLowerCase()) : ethers.ZeroAddress);
+
+// Addresses on Robinhood Chain (Hardcoded & EIP-55 Checksummed)
+const UNISWAP_V4_POSM_ADDRESS      = '0x58daec3116aae6D93017bAAea7749052E8a04fA7';
+const UNISWAP_V4_STATEVIEW_ADDRESS = '0xF3334192D15450CdD385c8B70e03f9A6bD9E673b';
+const USDG_ADDRESS                 = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168';
+const UNIVERSAL_ROUTER_ADDRESS     = '0x8876789976dEcBfCbBbe364623C63652db8C0904';
+const PERMIT2_ADDRESS              = '0x000000000022D473030F116dDEE9F6B43aC78BA3';
+const WETH_ADDRESS                 = '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73';
+const UNISWAP_V3_FACTORY_ADDRESS   = '0x1f7d7550B1b028f7571E69A784071F0205FD2EfA';
+const UNISWAP_V3_POSM_ADDRESS      = '0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3';
 
 // Universal Router executes V4 swaps via command 0x10 (V4_SWAP)
 const UNIVERSAL_ROUTER_ABI = [
@@ -1500,8 +1500,8 @@ async function swapTokenToUsdgV4(wallet, tokenAddr, balance) {
   const provider  = wallet.provider;
   const deadline  = Math.floor(Date.now() / 1000) + 600;
 
-  const tAddrChk = ethers.getAddress(tokenAddr);
-  const usdgChk  = ethers.getAddress(USDG_ADDRESS);
+  const tAddrChk = safeAddr(tokenAddr);
+  const usdgChk  = safeAddr(USDG_ADDRESS);
   const [c0, c1] = tAddrChk.toLowerCase() < usdgChk.toLowerCase()
     ? [tAddrChk, usdgChk]
     : [usdgChk, tAddrChk];
