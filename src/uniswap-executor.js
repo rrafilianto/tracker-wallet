@@ -1185,10 +1185,131 @@ async function findAllUsdgPoolsV3(tokenAddress) {
 }
 
 // Combined: V4 USDG pools + V3 USDG/WETH pools, sorted by TVL
+// Dynamically fetch all active Uniswap V3 & V4 pools for tokenAddress via DexScreener Indexer + RPC
+async function fetchDynamicDexScreenerPools(tokenAddress) {
+  if (!tokenAddress) return [];
+  const tokenAddr = tokenAddress.toLowerCase();
+  const provider  = getProvider();
+
+  try {
+    const res  = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${tokenAddr}`);
+    const data = await res.json();
+    if (!data.pairs) return [];
+
+    const pools = [];
+    const sv    = new ethers.Contract(UNISWAP_V4_STATEVIEW_ADDRESS, STATEVIEW_ABI, provider);
+
+    for (const p of data.pairs) {
+      if (p.dexId !== 'uniswap') continue;
+      const isV3 = p.labels?.includes('v3');
+      const isV4 = p.labels?.includes('v4');
+      if (!isV3 && !isV4) continue;
+
+      const tvlUsd = Number(p.liquidity?.usd || 0);
+
+      if (isV3 && p.pairAddress) {
+        try {
+          const poolContract = new ethers.Contract(p.pairAddress, UNISWAP_V3_POOL_ABI, provider);
+          const [slot0, fee, tickSpacing, t0, t1] = await Promise.all([
+            poolContract.slot0(),
+            poolContract.fee().then(Number),
+            poolContract.tickSpacing().then(Number),
+            poolContract.token0(),
+            poolContract.token1(),
+          ]);
+          if (!slot0 || slot0.sqrtPriceX96 === 0n) continue;
+
+          let sym0 = 'TOKEN0', sym1 = 'TOKEN1', dec0 = 18, dec1 = 18;
+          if (t0.toLowerCase() === USDG_ADDRESS.toLowerCase()) { sym0 = 'USDG'; dec0 = 6; }
+          else if (t0.toLowerCase() === WETH_ADDRESS.toLowerCase()) { sym0 = 'WETH'; dec0 = 18; }
+          else { try { const c0 = new ethers.Contract(t0, ERC20_ABI, provider); [dec0, sym0] = await Promise.all([c0.decimals().then(Number), c0.symbol()]); } catch {} }
+
+          if (t1.toLowerCase() === USDG_ADDRESS.toLowerCase()) { sym1 = 'USDG'; dec1 = 6; }
+          else if (t1.toLowerCase() === WETH_ADDRESS.toLowerCase()) { sym1 = 'WETH'; dec1 = 18; }
+          else { try { const c1 = new ethers.Contract(t1, ERC20_ABI, provider); [dec1, sym1] = await Promise.all([c1.decimals().then(Number), c1.symbol()]); } catch {} }
+
+          const isC0Usdg = t0.toLowerCase() === USDG_ADDRESS.toLowerCase();
+          const isC1Usdg = t1.toLowerCase() === USDG_ADDRESS.toLowerCase();
+          const qSym     = p.quoteToken?.symbol?.toUpperCase() || (isC0Usdg || isC1Usdg ? 'USDG' : 'WETH');
+
+          pools.push({
+            pk: { currency0: t0, currency1: t1, fee, tickSpacing },
+            poolId: p.pairAddress,
+            sqrtPriceX96: slot0.sqrtPriceX96.toString(),
+            tick: Number(slot0.tick),
+            dec0, dec1, sym0, sym1, isC0Usdg, isC1Usdg,
+            tvlUsd,
+            isV3: true,
+            protocol: 'v3',
+            quoteToken: qSym,
+            quoteTokenAddress: isC0Usdg || isC1Usdg ? USDG_ADDRESS : (t0.toLowerCase() === WETH_ADDRESS.toLowerCase() ? t0 : t1),
+          });
+        } catch {}
+      } else if (isV4 && p.pairAddress) {
+        try {
+          const poolId = p.pairAddress;
+          const slot0  = await sv.getSlot0(poolId);
+          if (!slot0 || slot0.sqrtPriceX96 === 0n) continue;
+
+          const lpFee = slot0.lpFee ? Number(slot0.lpFee) : 3000;
+          let tickSpacing = 60;
+          if (lpFee <= 100) tickSpacing = 1;
+          else if (lpFee <= 1000) tickSpacing = 10;
+          else if (lpFee <= 2000) tickSpacing = 20;
+          else if (lpFee >= 10000) tickSpacing = 200;
+
+          const qSym = p.quoteToken?.symbol?.toUpperCase() || 'USDG';
+          const isETH  = qSym === 'ETH';
+          const isWETH = qSym === 'WETH';
+
+          let qAddr = USDG_ADDRESS;
+          if (isETH) qAddr = ethers.ZeroAddress;
+          else if (isWETH) qAddr = WETH_ADDRESS;
+
+          const [c0, c1] = tokenAddress.toLowerCase() < qAddr.toLowerCase()
+            ? [tokenAddress, qAddr]
+            : [qAddr, tokenAddress];
+
+          let sym0 = 'TOKEN', sym1 = 'TOKEN', dec0 = 18, dec1 = 18;
+          if (c0.toLowerCase() === USDG_ADDRESS.toLowerCase()) { sym0 = 'USDG'; dec0 = 6; }
+          else if (c0.toLowerCase() === ethers.ZeroAddress.toLowerCase()) { sym0 = 'ETH'; dec0 = 18; }
+          else if (c0.toLowerCase() === WETH_ADDRESS.toLowerCase()) { sym0 = 'WETH'; dec0 = 18; }
+          else { try { const c0Contract = new ethers.Contract(c0, ERC20_ABI, provider); [dec0, sym0] = await Promise.all([c0Contract.decimals().then(Number), c0Contract.symbol()]); } catch {} }
+
+          if (c1.toLowerCase() === USDG_ADDRESS.toLowerCase()) { sym1 = 'USDG'; dec1 = 6; }
+          else if (c1.toLowerCase() === ethers.ZeroAddress.toLowerCase()) { sym1 = 'ETH'; dec1 = 18; }
+          else if (c1.toLowerCase() === WETH_ADDRESS.toLowerCase()) { sym1 = 'WETH'; dec1 = 18; }
+          else { try { const c1Contract = new ethers.Contract(c1, ERC20_ABI, provider); [dec1, sym1] = await Promise.all([c1Contract.decimals().then(Number), c1Contract.symbol()]); } catch {} }
+
+          pools.push({
+            pk: { currency0: c0, currency1: c1, fee: lpFee, tickSpacing, hooks: HOOKS_ZERO },
+            poolId,
+            sqrtPriceX96: slot0.sqrtPriceX96.toString(),
+            tick: Number(slot0.tick),
+            dec0, dec1, sym0, sym1,
+            isC0Usdg: c0.toLowerCase() === USDG_ADDRESS.toLowerCase(),
+            isC1Usdg: c1.toLowerCase() === USDG_ADDRESS.toLowerCase(),
+            tvlUsd,
+            isV4: true,
+            protocol: 'v4',
+            quoteToken: qSym,
+            quoteTokenAddress: qAddr,
+          });
+        } catch {}
+      }
+    }
+    return pools;
+  } catch {
+    return [];
+  }
+}
+
+// Combined: Static search + Dynamic DexScreener search (all custom fee tiers V3 & V4)
 async function findAllUsdgPoolsCombined(tokenAddress) {
-  const [v4Pools, v3Pools] = await Promise.all([
+  const [v4Pools, v3Pools, dynPools] = await Promise.all([
     findAllUsdgPools(tokenAddress).catch(() => []),
     findAllUsdgPoolsV3(tokenAddress).catch(() => []),
+    fetchDynamicDexScreenerPools(tokenAddress).catch(() => []),
   ]);
 
   // Tag V4 pools with protocol info
@@ -1199,7 +1320,15 @@ async function findAllUsdgPoolsCombined(tokenAddress) {
     quoteTokenAddress: USDG_ADDRESS,
   }));
 
-  const all = [...taggedV4, ...v3Pools];
+  const poolMap = new Map();
+  [...dynPools, ...v3Pools, ...taggedV4].forEach(p => {
+    const key = (p.poolId || '').toLowerCase();
+    if (key && !poolMap.has(key)) {
+      poolMap.set(key, p);
+    }
+  });
+
+  const all = Array.from(poolMap.values());
   all.sort((a, b) => b.tvlUsd - a.tvlUsd);
   return all;
 }
@@ -1669,6 +1798,9 @@ async function executeAutoDeployLpV3(tokenAddress, amountUsd, preFoundPool, rang
     ? Math.pow(10, dec1 - 6) / rawNowPrice
     : rawNowPrice * Math.pow(10, dec0 - 6);
 
+  const qAddr = poolInfo.quoteTokenAddress ? poolInfo.quoteTokenAddress.toLowerCase() : USDG_ADDRESS.toLowerCase();
+  const isQ0  = isC0Usdg || (pk.currency0 && pk.currency0.toLowerCase() === qAddr) || sym0 === quoteToken;
+
   return {
     swapTxHash,
     hash: receipt.hash,
@@ -1676,7 +1808,7 @@ async function executeAutoDeployLpV3(tokenAddress, amountUsd, preFoundPool, rang
     tickSpacing: Number(tickSpacing),
     tickLower,
     tickUpper,
-    tokenSymbol: isC0Usdg ? sym1 : sym0,
+    tokenSymbol: isQ0 ? sym1 : sym0,
     priceMin: Math.min(priceAtLower, priceAtUpper),
     priceMax: Math.max(priceAtLower, priceAtUpper),
     priceNow,

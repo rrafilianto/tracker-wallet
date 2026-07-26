@@ -357,6 +357,13 @@ function tickToTokenPrice(tick, poolInfo) {
   }
 }
 
+function getTargetTokenSymbol(poolInfo) {
+  if (!poolInfo) return 'TOKEN';
+  const qAddr = poolInfo.quoteTokenAddress ? poolInfo.quoteTokenAddress.toLowerCase() : '0x5fc5360d0400a0fd4f2af552add042d716f1d168';
+  const isQ0  = poolInfo.isC0Usdg || (poolInfo.pk?.currency0 && poolInfo.pk.currency0.toLowerCase() === qAddr) || poolInfo.sym0 === poolInfo.quoteToken;
+  return isQ0 ? poolInfo.sym1 : poolInfo.sym0;
+}
+
 // Helper: bangun teks + keyboard kartu konfirmasi deploy
 function buildDeployConfirmation(poolInfo, shortKey, idx, settings, updatedAt = null) {
   const { dec0, dec1, pk, tick, protocol, quoteToken, quoteTokenAddress, sym0, sym1, isC0Usdg } = poolInfo;
@@ -464,7 +471,7 @@ async function handleAutoDeploy(msg, addr) {
     // Simpan pools untuk dipakai saat user klik
     pendingPoolSelections.set(shortKey, { tokenAddr: addr, pools });
 
-    const tokenSym = pools[0].isC0Usdg ? pools[0].sym1 : pools[0].sym0;
+    const tokenSym = getTargetTokenSymbol(pools[0]);
 
     // Bangun keyboard — satu baris per pool, dengan badge V3/V4
     const poolButtons = pools.map((p, idx) => {
@@ -714,7 +721,7 @@ bot.on('callback_query', async (query) => {
       const poolInfo = selection.pools[idx];
       if (!poolInfo) throw new Error('Pool data tidak ditemukan.');
 
-      const tokenSym  = poolInfo.isC0Usdg ? poolInfo.sym1 : poolInfo.sym0;
+      const tokenSym  = getTargetTokenSymbol(poolInfo);
       const quoteSym   = poolInfo.quoteToken || 'USDG';
       const feePct     = (poolInfo.pk.fee / 10000).toFixed(2);
       const tvlStr     = formatTvl(poolInfo.tvlUsd);
