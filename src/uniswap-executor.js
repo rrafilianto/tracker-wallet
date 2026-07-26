@@ -1328,7 +1328,9 @@ async function findAllUsdgPoolsCombined(tokenAddress) {
     }
   });
 
-  const all = Array.from(poolMap.values());
+  let all = Array.from(poolMap.values());
+  // Filter out pools with TVL < $1,000
+  all = all.filter(p => (p.tvlUsd || 0) >= 1000);
   all.sort((a, b) => b.tvlUsd - a.tvlUsd);
   return all;
 }
