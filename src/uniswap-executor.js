@@ -2,6 +2,7 @@ const { ethers } = require('ethers');
 const { Token, CurrencyAmount, Ether } = require('@uniswap/sdk-core');
 const v4sdk = require('@uniswap/v4-sdk');
 const { Pool, Position } = v4sdk;
+const v3sdk = require('@uniswap/v3-sdk');
 const rpcDecoder = require('./rpc-decoder');
 
 // Uniswap V4 fee tiers (supports any fee tier, including >1% fees: 2%, 3%, 5%, 10%)
@@ -48,11 +49,16 @@ const ERC20_ABI = [
 ];
 
 // Addresses on Robinhood Chain
-const UNISWAP_V4_POSM_ADDRESS = process.env.UNISWAP_V4_POSM_ADDRESS || '0x58daec3116aae6D93017bAAea7749052E8a04fA7';
-const UNISWAP_V4_STATEVIEW_ADDRESS = process.env.UNISWAP_V4_STATEVIEW_ADDRESS || '0xF3334192D15450CdD385c8B70e03f9A6bD9E673b';
-const USDG_ADDRESS = process.env.USDG_ADDRESS || '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168';
-const UNIVERSAL_ROUTER_ADDRESS = process.env.UNIVERSAL_ROUTER_ADDRESS || '0x8876789976deCbFcbBBe364623C63652dB8c0904';
-const PERMIT2_ADDRESS = process.env.PERMIT2_ADDRESS || '0x000000000022D473030F116dDEE9F6B43aC78BA3';
+const UNISWAP_V4_POSM_ADDRESS       = process.env.UNISWAP_V4_POSM_ADDRESS       || '0x58daec3116aae6D93017bAAea7749052E8a04fA7';
+const UNISWAP_V4_STATEVIEW_ADDRESS  = process.env.UNISWAP_V4_STATEVIEW_ADDRESS  || '0xF3334192D15450CdD385c8B70e03f9A6bD9E673b';
+const USDG_ADDRESS                  = process.env.USDG_ADDRESS                  || '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168';
+const UNIVERSAL_ROUTER_ADDRESS      = process.env.UNIVERSAL_ROUTER_ADDRESS      || '0x8876789976deCbFcbBBe364623C63652dB8c0904';
+const PERMIT2_ADDRESS               = process.env.PERMIT2_ADDRESS               || '0x000000000022D473030F116dDEE9F6B43aC78BA3';
+// WETH resmi di Robinhood Chain (bukan 0x4200..., yang bukan contract)
+const WETH_ADDRESS                  = process.env.WETH_ADDRESS                  || '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73';
+// Uniswap V3 contracts (verified via Blockscout)
+const UNISWAP_V3_FACTORY_ADDRESS    = process.env.UNISWAP_V3_FACTORY_ADDRESS    || '0x1f7d7550B1b028f7571E69A784071F0205FD2EfA';
+const UNISWAP_V3_POSM_ADDRESS       = process.env.UNISWAP_V3_POSM_ADDRESS       || '0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3';
 
 // Universal Router executes V4 swaps via command 0x10 (V4_SWAP)
 const UNIVERSAL_ROUTER_ABI = [
@@ -63,6 +69,42 @@ const PERMIT2_ABI = [
   'function allowance(address owner, address token, address spender) view returns (uint160 amount, uint48 expiration, uint48 nonce)',
 ];
 const V4_SWAP_COMMAND = '0x10';
+
+// Uniswap V3 ABIs
+const UNISWAP_V3_FACTORY_ABI = [
+  'function getPool(address tokenA, address tokenB, uint24 fee) view returns (address pool)',
+];
+const UNISWAP_V3_POOL_ABI = [
+  'function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)',
+  'function liquidity() view returns (uint128)',
+  'function token0() view returns (address)',
+  'function token1() view returns (address)',
+  'function fee() view returns (uint24)',
+  'function tickSpacing() view returns (int24)',
+];
+const UNISWAP_V3_POSM_ABI = [
+  'function positions(uint256 tokenId) view returns (uint96 nonce, address operator, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128, uint128 tokensOwed0, uint128 tokensOwed1)',
+  'function mint(tuple(address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint256 amount0Desired, uint256 amount1Desired, uint256 amount0Min, uint256 amount1Min, address recipient, uint256 deadline) params) payable returns (uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)',
+  'function collect(tuple(uint256 tokenId, address recipient, uint128 amount0Max, uint128 amount1Max) params) returns (uint256 amount0, uint256 amount1)',
+  'function decreaseLiquidity(tuple(uint256 tokenId, uint128 liquidity, uint256 amount0Min, uint256 amount1Min, uint256 deadline) params) returns (uint256 amount0, uint256 amount1)',
+  'function ownerOf(uint256 tokenId) view returns (address)',
+  'function burn(uint256 tokenId)',
+];
+const WETH9_ABI = [
+  'function deposit() payable',
+  'function withdraw(uint256 wad)',
+];
+
+// V3 fee tiers (standard Uniswap V3)
+const V3_FEE_TIERS = [
+  { fee: 100,   tickSpacing: 1  },  // 0.01%
+  { fee: 500,   tickSpacing: 10 },  // 0.05%
+  { fee: 3000,  tickSpacing: 60 },  // 0.30%
+  { fee: 10000, tickSpacing: 200 }, // 1.00%
+];
+
+// Gas reserve to keep for ETH-native positions
+const ETH_GAS_RESERVE = ethers.parseEther('0.005');
 
 const signed24 = (v) => (v >= 0x800000 ? v - 0x1000000 : v);
 const MASK256 = (1n << 256n) - 1n;
@@ -373,7 +415,7 @@ async function getExecutorBalance() {
   // Common tokens on Robinhood chain
   const knownTokens = [
     { symbol: 'USDG', address: USDG_ADDRESS, decimals: 6 },
-    { symbol: 'WETH', address: '0x4200000000000000000000000000000000000006', decimals: 18 }
+    { symbol: 'WETH', address: WETH_ADDRESS, decimals: 18 }
   ];
 
   const tokenBalances = [];
@@ -514,7 +556,8 @@ async function getExecutorPositions() {
             priceMax,
             priceNow,
             inRange,
-            isV4: true
+            isV4: true,
+            protocol: 'v4',
           });
         } catch {
           // Skip if burned or non-owned
@@ -523,6 +566,66 @@ async function getExecutorPositions() {
     }
   } catch {
     // Skip V4 error
+  }
+
+  // 3. Check Uniswap V3 Positions (UNI-V3-POS NFTs)
+  try {
+    const url = `https://robinhoodchain.blockscout.com/api/v2/addresses/${wallet.address}/nft?contract_address_hash=${UNISWAP_V3_POSM_ADDRESS}`;
+    const res = await fetch(url);
+    const data = await res.json();
+
+    if (data.items) {
+      for (const item of data.items) {
+        const tid = (item.id || item.token_id).toString();
+        try {
+          const v3Detail = await getV3PositionDetails(tid, wallet.address);
+          if (!v3Detail) continue;
+
+          const mintTsStr = nftMintTsMap[tid];
+          let ageHours = 24;
+          if (mintTsStr) {
+            const ageMs = Date.now() - new Date(mintTsStr).getTime();
+            ageHours = Math.max(0.5, ageMs / (1000 * 3600));
+          }
+
+          const totalPosUsd = v3Detail.valueUsd;
+          const estHourlyUsd = v3Detail.feeUsd > 0 ? v3Detail.feeUsd / ageHours : 0;
+          const estHourlyPercent = totalPosUsd > 0 ? (estHourlyUsd / totalPosUsd) * 100 : 0;
+          const ageStr = formatAgeFromTimestamp(mintTsStr);
+
+          positions.push({
+            tokenId: tid,
+            symbol0: v3Detail.sym0,
+            symbol1: v3Detail.sym1,
+            amount0: v3Detail.amount0,
+            amount1: v3Detail.amount1,
+            totalUsd: v3Detail.valueUsd,
+            depAmount0: 0, depAmount1: 0, depTotalUsd: 0,
+            unclaimed0: v3Detail.unclaimed0,
+            unclaimed1: v3Detail.unclaimed1,
+            unclaimedUsd: v3Detail.feeUsd,
+            estHourlyUsd,
+            estHourlyPercent,
+            pnlUsd: 0, pnlPercent: 0,
+            fee: v3Detail.feePct,
+            liquidity: 'Active',
+            ageStr,
+            tickLower: v3Detail.tickLower,
+            tickUpper: v3Detail.tickUpper,
+            priceMin: v3Detail.priceMin,
+            priceMax: v3Detail.priceMax,
+            priceNow: v3Detail.priceNow,
+            inRange: v3Detail.inRange,
+            isV3: true,
+            protocol: 'v3',
+          });
+        } catch {
+          // Skip if burned or non-owned
+        }
+      }
+    }
+  } catch {
+    // Skip V3 error
   }
 
   return positions;
@@ -976,14 +1079,619 @@ async function executeAutoDeployLp(tokenAddress, amountUsd = 50, preFoundPool = 
   };
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Uniswap V3 Support
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Returns all active V3 pools for a token where quote token is USDG or WETH.
+async function findAllUsdgPoolsV3(tokenAddress) {
+  if (!tokenAddress) throw new Error('tokenAddress required');
+  if (tokenAddress.toLowerCase() === USDG_ADDRESS.toLowerCase()) {
+    throw new Error('Cannot deploy USDG/USDG pool');
+  }
+
+  const provider = getProvider();
+  const factory = new ethers.Contract(UNISWAP_V3_FACTORY_ADDRESS, UNISWAP_V3_FACTORY_ABI, provider);
+
+  const tokenAddr = ethers.getAddress(tokenAddress);
+  const usdgAddr  = ethers.getAddress(USDG_ADDRESS);
+  const wethAddr  = ethers.getAddress(WETH_ADDRESS);
+
+  let tokenDec = 18, tokenSym = 'TOKEN';
+  try {
+    const c = new ethers.Contract(tokenAddr, ERC20_ABI, provider);
+    [tokenDec, tokenSym] = await Promise.all([c.decimals().then(Number), c.symbol()]);
+  } catch {}
+
+  const pools = [];
+
+  // Check both USDG and WETH quote tokens per fee tier
+  const quotePairs = [
+    { qAddr: usdgAddr, qSym: 'USDG', qDec: 6,  label: 'USDG' },
+    { qAddr: wethAddr, qSym: 'WETH', qDec: 18, label: 'WETH' },
+  ];
+
+  for (const { qAddr, qSym, qDec, label } of quotePairs) {
+    for (const { fee, tickSpacing } of V3_FEE_TIERS) {
+      try {
+        const poolAddr = await factory.getPool(tokenAddr, qAddr, fee);
+        if (!poolAddr || poolAddr === ethers.ZeroAddress) continue;
+
+        const poolContract = new ethers.Contract(poolAddr, UNISWAP_V3_POOL_ABI, provider);
+        const [slot0Data, totalLiq, t0, t1] = await Promise.all([
+          poolContract.slot0(),
+          poolContract.liquidity().catch(() => 0n),
+          poolContract.token0(),
+          poolContract.token1(),
+        ]);
+
+        if (!slot0Data || slot0Data.sqrtPriceX96 === 0n) continue;
+
+        // Determine ordering
+        const isQ0 = t0.toLowerCase() === qAddr.toLowerCase();
+        const currency0 = t0;
+        const currency1 = t1;
+        const isC0Usdg  = isQ0 && label === 'USDG';
+        const isC1Usdg  = !isQ0 && label === 'USDG';
+        const dec0      = isQ0 ? qDec : tokenDec;
+        const dec1      = isQ0 ? tokenDec : qDec;
+        const sym0      = isQ0 ? qSym : tokenSym;
+        const sym1      = isQ0 ? tokenSym : qSym;
+
+        // Estimate TVL
+        let tvlUsd = 0;
+        try {
+          if (totalLiq > 0n) {
+            const liqNum = Number(totalLiq);
+            const sqrtP  = Number(slot0Data.sqrtPriceX96) / Math.pow(2, 96);
+            if (label === 'USDG') {
+              tvlUsd = isC1Usdg
+                ? 2 * liqNum * sqrtP / 1e6
+                : 2 * liqNum / sqrtP / 1e6;
+            } else {
+              // WETH: rough ETH price ~$2000
+              tvlUsd = isQ0
+                ? 2 * liqNum / sqrtP / 1e18 * 2000
+                : 2 * liqNum * sqrtP / 1e18 * 2000;
+            }
+          }
+        } catch {}
+
+        pools.push({
+          pk: { currency0, currency1, fee, tickSpacing },
+          poolId: poolAddr,
+          sqrtPriceX96: slot0Data.sqrtPriceX96.toString(),
+          tick: Number(slot0Data.tick),
+          dec0, dec1, sym0, sym1, isC0Usdg, isC1Usdg,
+          tvlUsd,
+          isV3: true,
+          protocol: 'v3',
+          quoteToken: label,
+          quoteTokenAddress: qAddr,
+        });
+      } catch {}
+    }
+  }
+
+  pools.sort((a, b) => b.tvlUsd - a.tvlUsd);
+  return pools;
+}
+
+// Combined: V4 USDG pools + V3 USDG/WETH pools, sorted by TVL
+async function findAllUsdgPoolsCombined(tokenAddress) {
+  const [v4Pools, v3Pools] = await Promise.all([
+    findAllUsdgPools(tokenAddress).catch(() => []),
+    findAllUsdgPoolsV3(tokenAddress).catch(() => []),
+  ]);
+
+  // Tag V4 pools with protocol info
+  const taggedV4 = v4Pools.map(p => ({
+    ...p,
+    protocol: 'v4',
+    quoteToken: p.isC0Usdg || p.isC1Usdg ? 'USDG' : 'OTHER',
+    quoteTokenAddress: USDG_ADDRESS,
+  }));
+
+  const all = [...taggedV4, ...v3Pools];
+  all.sort((a, b) => b.tvlUsd - a.tvlUsd);
+  return all;
+}
+
+// Pre-flight: ensure wallet has enough quote token. Swaps USDG→WETH if needed.
+// Returns { swapTxHash: string|null }
+async function ensureQuoteTokenBalance(wallet, quoteToken, amountNeededRaw) {
+  const provider = wallet.provider;
+  const amountNeeded = BigInt(amountNeededRaw.toString());
+
+  if (quoteToken === 'USDG') {
+    return { swapTxHash: null }; // wallet always has USDG
+  }
+
+  if (quoteToken === 'WETH') {
+    const wethContract = new ethers.Contract(WETH_ADDRESS, ERC20_ABI, provider);
+    const wethBalance  = await wethContract.balanceOf(wallet.address).catch(() => 0n);
+
+    // Case 1: already have enough
+    if (wethBalance >= amountNeeded) return { swapTxHash: null };
+
+    // Case 2: swap only the deficit
+    const deficit = amountNeeded - wethBalance;
+    const swapTxHash = await swapUsdgToWeth(wallet, deficit);
+    return { swapTxHash };
+  }
+
+  if (quoteToken === 'ETH') {
+    const ethBalance = await provider.getBalance(wallet.address);
+    const ethUsable  = ethBalance > ETH_GAS_RESERVE ? ethBalance - ETH_GAS_RESERVE : 0n;
+
+    // Case 1: already have enough usable ETH
+    if (ethUsable >= amountNeeded) return { swapTxHash: null };
+
+    // Case 2: swap deficit USDG→WETH then unwrap to ETH
+    const deficit = amountNeeded - ethUsable;
+    const swapTxHash = await swapUsdgToEth(wallet, deficit);
+    return { swapTxHash };
+  }
+
+  return { swapTxHash: null };
+}
+
+// Swap USDG → WETH via V4 Universal Router
+async function swapUsdgToWeth(wallet, wethAmountRaw) {
+  const provider   = wallet.provider;
+  const CHAIN_ID   = 4663;
+  const deadline   = Math.floor(Date.now() / 1000) + 600;
+
+  // Approve USDG to Universal Router
+  const usdgContract = new ethers.Contract(USDG_ADDRESS, ERC20_ABI, wallet);
+  const usdgBalance  = await usdgContract.balanceOf(wallet.address);
+  const allowance    = await usdgContract.allowance(wallet.address, UNIVERSAL_ROUTER_ADDRESS).catch(() => 0n);
+  if (allowance < usdgBalance) {
+    await (await usdgContract.approve(UNIVERSAL_ROUTER_ADDRESS, ethers.MaxUint256)).wait();
+  }
+
+  // Determine pool ordering for USDG/WETH V4 pool (need to find it first)
+  const usdgAddr = ethers.getAddress(USDG_ADDRESS);
+  const wethAddr = ethers.getAddress(WETH_ADDRESS);
+  const [c0, c1] = usdgAddr.toLowerCase() < wethAddr.toLowerCase()
+    ? [usdgAddr, wethAddr]
+    : [wethAddr, usdgAddr];
+  const zeroForOne = c0.toLowerCase() === usdgAddr.toLowerCase();
+
+  // Find the best USDG/WETH V4 pool
+  const sv    = new ethers.Contract(UNISWAP_V4_STATEVIEW_ADDRESS, STATEVIEW_ABI, provider);
+  const coder = ethers.AbiCoder.defaultAbiCoder();
+  let bestPoolKey = null;
+  for (const { fee, tickSpacing } of ALL_FEE_TIERS) {
+    const poolId = ethers.keccak256(coder.encode(
+      ['address', 'address', 'uint24', 'int24', 'address'],
+      [c0, c1, fee, tickSpacing, HOOKS_ZERO]
+    ));
+    try {
+      const s0 = await sv.getSlot0(poolId);
+      if (s0.sqrtPriceX96 > 0n) { bestPoolKey = { currency0: c0, currency1: c1, fee, tickSpacing, hooks: HOOKS_ZERO }; break; }
+    } catch {}
+  }
+  if (!bestPoolKey) throw new Error('No USDG/WETH V4 pool found for swap');
+
+  // Swap exact-out WETH (receive wethAmountRaw WETH, pay up to all USDG balance)
+  const swapPlanner = new v4sdk.V4Planner();
+  swapPlanner.addAction(v4sdk.Actions.SWAP_EXACT_IN_SINGLE, [{
+    poolKey: bestPoolKey,
+    zeroForOne,
+    amountIn: usdgBalance,
+    amountOutMinimum: wethAmountRaw,
+    hookData: '0x',
+  }]);
+  swapPlanner.addAction(v4sdk.Actions.SETTLE_ALL, [USDG_ADDRESS, usdgBalance]);
+  swapPlanner.addAction(v4sdk.Actions.TAKE_ALL, [WETH_ADDRESS, wethAmountRaw]);
+
+  const router = new ethers.Contract(UNIVERSAL_ROUTER_ADDRESS, UNIVERSAL_ROUTER_ABI, wallet);
+  const tx     = await router.execute(V4_SWAP_COMMAND, [swapPlanner.finalize()], deadline);
+  const receipt = await tx.wait();
+  return receipt.hash;
+}
+
+// Swap USDG → WETH → unwrap to ETH
+async function swapUsdgToEth(wallet, ethAmountRaw) {
+  const wethTxHash = await swapUsdgToWeth(wallet, ethAmountRaw);
+
+  // Unwrap WETH → ETH
+  const weth9   = new ethers.Contract(WETH_ADDRESS, WETH9_ABI, wallet);
+  const unwrapTx = await weth9.withdraw(ethAmountRaw);
+  await unwrapTx.wait();
+
+  return wethTxHash; // return the swap hash (unwrap is secondary)
+}
+
+// Get details of a V3 position
+async function getV3PositionDetails(tokenId, walletAddress) {
+  const provider = getProvider();
+  const posm     = new ethers.Contract(UNISWAP_V3_POSM_ADDRESS, UNISWAP_V3_POSM_ABI, provider);
+
+  const owner = await posm.ownerOf(tokenId).catch(() => ethers.ZeroAddress);
+  if (owner.toLowerCase() !== walletAddress.toLowerCase()) return null;
+
+  const pos = await posm.positions(tokenId).catch(() => null);
+  if (!pos || pos.liquidity === 0n) return null;
+
+  const { token0, token1, fee, tickLower, tickUpper, liquidity,
+          tokensOwed0, tokensOwed1 } = pos;
+
+  let dec0 = 18, sym0 = 'TOKEN0';
+  let dec1 = 18, sym1 = 'TOKEN1';
+
+  const isC0Usdg = token0.toLowerCase() === USDG_ADDRESS.toLowerCase();
+  const isC1Usdg = token1.toLowerCase() === USDG_ADDRESS.toLowerCase();
+  const isC0Weth = token0.toLowerCase() === WETH_ADDRESS.toLowerCase();
+  const isC1Weth = token1.toLowerCase() === WETH_ADDRESS.toLowerCase();
+
+  if (isC0Usdg) { dec0 = 6; sym0 = 'USDG'; }
+  else if (isC0Weth) { dec0 = 18; sym0 = 'WETH'; }
+  else {
+    try { const c = new ethers.Contract(token0, ERC20_ABI, provider); [dec0, sym0] = await Promise.all([c.decimals().then(Number), c.symbol()]); } catch {}
+  }
+
+  if (isC1Usdg) { dec1 = 6; sym1 = 'USDG'; }
+  else if (isC1Weth) { dec1 = 18; sym1 = 'WETH'; }
+  else {
+    try { const c = new ethers.Contract(token1, ERC20_ABI, provider); [dec1, sym1] = await Promise.all([c.decimals().then(Number), c.symbol()]); } catch {}
+  }
+
+  // Get current tick from pool
+  const factory    = new ethers.Contract(UNISWAP_V3_FACTORY_ADDRESS, UNISWAP_V3_FACTORY_ABI, provider);
+  const poolAddr   = await factory.getPool(token0, token1, fee).catch(() => ethers.ZeroAddress);
+  if (poolAddr === ethers.ZeroAddress) return null;
+
+  const poolContract = new ethers.Contract(poolAddr, UNISWAP_V3_POOL_ABI, provider);
+  const slot0Data    = await poolContract.slot0().catch(() => null);
+  if (!slot0Data) return null;
+
+  const CHAIN_ID  = 4663;
+  const feeNumber = Number(fee);
+
+  // Find tickSpacing from V3_FEE_TIERS
+  const tierInfo  = V3_FEE_TIERS.find(t => t.fee === feeNumber) || { tickSpacing: 60 };
+  const tickSpacing = tierInfo.tickSpacing;
+
+  const tick = Number(slot0Data.tick);
+  const sqrtPriceX96 = slot0Data.sqrtPriceX96.toString();
+
+  const cur0 = new v3sdk.Token(CHAIN_ID, ethers.getAddress(token0), dec0, sym0);
+  const cur1 = new v3sdk.Token(CHAIN_ID, ethers.getAddress(token1), dec1, sym1);
+
+  const pool = new v3sdk.Pool(cur0, cur1, feeNumber, tickSpacing, sqrtPriceX96, liquidity.toString(), tick);
+  const position = new v3sdk.Position({ pool, liquidity: liquidity.toString(), tickLower: Number(tickLower), tickUpper: Number(tickUpper) });
+
+  const amt0 = Number(position.amount0.toExact());
+  const amt1 = Number(position.amount1.toExact());
+
+  // Unclaimed fees
+  const unc0 = Number(ethers.formatUnits(tokensOwed0, dec0));
+  const unc1 = Number(ethers.formatUnits(tokensOwed1, dec1));
+
+  // Value in USD
+  let valueUsd = 0, feeUsd = 0;
+  const sqrtP  = Number(sqrtPriceX96) / Math.pow(2, 96);
+  const rawNow = sqrtP * sqrtP;
+
+  if (isC0Usdg) {
+    const priceToken = Math.pow(10, dec1 - 6) / rawNow;
+    valueUsd = (amt0 + unc0) + (amt1 + unc1) * priceToken;
+    feeUsd   = unc0 + unc1 * priceToken;
+  } else if (isC1Usdg) {
+    const priceToken = rawNow * Math.pow(10, dec0 - 6);
+    valueUsd = (amt1 + unc1) + (amt0 + unc0) * priceToken;
+    feeUsd   = unc1 + unc0 * priceToken;
+  } else if (isC0Weth || isC1Weth) {
+    // Rough estimate using ETH~$2000
+    const ETH_PRICE = 2000;
+    if (isC1Weth) {
+      valueUsd = (amt1 + unc1) * ETH_PRICE + (amt0 + unc0) * rawNow * ETH_PRICE * Math.pow(10, dec0 - 18);
+      feeUsd   = unc1 * ETH_PRICE;
+    } else {
+      valueUsd = (amt0 + unc0) * ETH_PRICE + (amt1 + unc1) / rawNow * ETH_PRICE * Math.pow(10, dec1 - 18);
+      feeUsd   = unc0 * ETH_PRICE;
+    }
+  }
+
+  const inRange = tick >= Number(tickLower) && tick <= Number(tickUpper);
+
+  // Price range
+  let priceA = 0, priceB = 0, priceNow = 0;
+  if (isC0Usdg) {
+    priceA   = Math.pow(10, dec1 - 6) / Math.pow(1.0001, Number(tickLower));
+    priceB   = Math.pow(10, dec1 - 6) / Math.pow(1.0001, Number(tickUpper));
+    priceNow = Math.pow(10, dec1 - 6) / rawNow;
+  } else if (isC1Usdg) {
+    priceA   = Math.pow(1.0001, Number(tickLower)) * Math.pow(10, dec0 - 6);
+    priceB   = Math.pow(1.0001, Number(tickUpper)) * Math.pow(10, dec0 - 6);
+    priceNow = rawNow * Math.pow(10, dec0 - 6);
+  } else {
+    priceA   = Math.pow(1.0001, Number(tickLower)) * Math.pow(10, dec0 - dec1);
+    priceB   = Math.pow(1.0001, Number(tickUpper)) * Math.pow(10, dec0 - dec1);
+    priceNow = rawNow * Math.pow(10, dec0 - dec1);
+  }
+
+  return {
+    tokenId,
+    sym0, sym1, dec0, dec1,
+    amount0: amt0, amount1: amt1,
+    unclaimed0: unc0, unclaimed1: unc1,
+    valueUsd, feeUsd,
+    feePct: feeNumber / 10000,
+    tickLower: Number(tickLower), tickUpper: Number(tickUpper), tickCurrent: tick,
+    sqrtPriceX96,
+    isC0Usdg, isC1Usdg,
+    inRange,
+    priceMin: Math.min(priceA, priceB),
+    priceMax: Math.max(priceA, priceB),
+    priceNow,
+    protocol: 'v3',
+    isV3: true,
+  };
+}
+
+// Close a V3 position and swap non-USDG/non-WETH tokens back
+async function closeV3PositionAndSwapToUsdg(tokenId) {
+  const wallet   = getWallet();
+  const provider = wallet.provider;
+  const posm     = new ethers.Contract(UNISWAP_V3_POSM_ADDRESS, UNISWAP_V3_POSM_ABI, wallet);
+  const deadline = Math.floor(Date.now() / 1000) + 600;
+
+  const pos = await posm.positions(tokenId);
+  const { token0, token1, fee, tickLower, tickUpper, liquidity } = pos;
+
+  // 1. Decrease liquidity to 0
+  if (liquidity > 0n) {
+    await (await posm.decreaseLiquidity({
+      tokenId, liquidity,
+      amount0Min: 0n, amount1Min: 0n,
+      deadline,
+    })).wait();
+  }
+
+  // 2. Collect all tokens (including fees)
+  const collectTx = await posm.collect({
+    tokenId,
+    recipient: wallet.address,
+    amount0Max: BigInt('0xffffffffffffffffffffffffffffffff'),
+    amount1Max: BigInt('0xffffffffffffffffffffffffffffffff'),
+  });
+  await collectTx.wait();
+
+  // 3. Burn the NFT
+  await (await posm.burn(tokenId)).wait();
+
+  const closeTxHash = collectTx.hash;
+
+  // 4. Swap non-USDG token to USDG if needed
+  const isC0Usdg = token0.toLowerCase() === USDG_ADDRESS.toLowerCase();
+  const isC1Usdg = token1.toLowerCase() === USDG_ADDRESS.toLowerCase();
+
+  let swapTxHash = null;
+
+  // Swap token0 → USDG if token0 is not USDG
+  if (!isC0Usdg) {
+    const t0 = new ethers.Contract(token0, ERC20_ABI, wallet);
+    const bal0 = await t0.balanceOf(wallet.address);
+    if (bal0 > 0n) swapTxHash = await swapTokenToUsdgV4(wallet, token0, bal0);
+  }
+
+  // Swap token1 → USDG if token1 is not USDG
+  if (!isC1Usdg) {
+    const t1 = new ethers.Contract(token1, ERC20_ABI, wallet);
+    const bal1 = await t1.balanceOf(wallet.address);
+    if (bal1 > 0n) swapTxHash = await swapTokenToUsdgV4(wallet, token1, bal1);
+  }
+
+  return { closeTxHash, swapTxHash };
+}
+
+// Helper: swap any ERC-20 token → USDG via V4 Universal Router
+async function swapTokenToUsdgV4(wallet, tokenAddr, balance) {
+  const provider  = wallet.provider;
+  const deadline  = Math.floor(Date.now() / 1000) + 600;
+
+  const tAddrChk = ethers.getAddress(tokenAddr);
+  const usdgChk  = ethers.getAddress(USDG_ADDRESS);
+  const [c0, c1] = tAddrChk.toLowerCase() < usdgChk.toLowerCase()
+    ? [tAddrChk, usdgChk]
+    : [usdgChk, tAddrChk];
+  const zeroForOne = c0.toLowerCase() === tAddrChk.toLowerCase();
+
+  // Find pool
+  const sv    = new ethers.Contract(UNISWAP_V4_STATEVIEW_ADDRESS, STATEVIEW_ABI, provider);
+  const coder = ethers.AbiCoder.defaultAbiCoder();
+  let bestPoolKey = null;
+  for (const { fee, tickSpacing } of ALL_FEE_TIERS) {
+    const poolId = ethers.keccak256(coder.encode(
+      ['address', 'address', 'uint24', 'int24', 'address'],
+      [c0, c1, fee, tickSpacing, HOOKS_ZERO]
+    ));
+    try {
+      const s0 = await sv.getSlot0(poolId);
+      if (s0.sqrtPriceX96 > 0n) { bestPoolKey = { currency0: c0, currency1: c1, fee, tickSpacing, hooks: HOOKS_ZERO }; break; }
+    } catch {}
+  }
+  if (!bestPoolKey) throw new Error(`No V4 pool found to swap ${tAddrChk} → USDG`);
+
+  const tokenContract = new ethers.Contract(tAddrChk, ERC20_ABI, wallet);
+  const allowance     = await tokenContract.allowance(wallet.address, UNIVERSAL_ROUTER_ADDRESS).catch(() => 0n);
+  if (allowance < balance) {
+    await (await tokenContract.approve(UNIVERSAL_ROUTER_ADDRESS, ethers.MaxUint256)).wait();
+  }
+
+  const swapPlanner = new v4sdk.V4Planner();
+  swapPlanner.addAction(v4sdk.Actions.SWAP_EXACT_IN_SINGLE, [{
+    poolKey: bestPoolKey, zeroForOne,
+    amountIn: balance, amountOutMinimum: 0n, hookData: '0x',
+  }]);
+  swapPlanner.addAction(v4sdk.Actions.SETTLE_ALL, [tAddrChk, balance]);
+  swapPlanner.addAction(v4sdk.Actions.TAKE_ALL, [USDG_ADDRESS, 0n]);
+
+  const router  = new ethers.Contract(UNIVERSAL_ROUTER_ADDRESS, UNIVERSAL_ROUTER_ABI, wallet);
+  const tx      = await router.execute(V4_SWAP_COMMAND, [swapPlanner.finalize()], deadline);
+  const receipt = await tx.wait();
+  return receipt.hash;
+}
+
+// Deploy LP into a V3 pool (one-side lower, quote token only)
+async function executeAutoDeployLpV3(tokenAddress, amountUsd, preFoundPool, rangePct = 20) {
+  const wallet   = getWallet();
+  const provider = wallet.provider;
+  const CHAIN_ID = 4663;
+  const deadline = Math.floor(Date.now() / 1000) + 600;
+
+  const poolInfo   = preFoundPool;
+  const { pk, sqrtPriceX96, tick, dec0, dec1, sym0, sym1, isC0Usdg, isC1Usdg, quoteToken } = poolInfo;
+  const { fee, tickSpacing } = pk;
+
+  // Build SDK objects
+  const cur0 = new v3sdk.Token(CHAIN_ID, ethers.getAddress(pk.currency0), dec0, sym0);
+  const cur1 = new v3sdk.Token(CHAIN_ID, ethers.getAddress(pk.currency1), dec1, sym1);
+
+  // Get current pool state
+  const poolContract  = new ethers.Contract(poolInfo.poolId, UNISWAP_V3_POOL_ABI, provider);
+  const slot0Data     = await poolContract.slot0();
+  const currentLiq    = await poolContract.liquidity().catch(() => 0n);
+
+  const pool = new v3sdk.Pool(
+    cur0, cur1,
+    Number(fee), Number(tickSpacing),
+    slot0Data.sqrtPriceX96.toString(),
+    currentLiq.toString(),
+    Number(slot0Data.tick)
+  );
+
+  // One-side lower tick range
+  const alignDown   = (t, ts) => Math.floor(t / ts) * ts;
+  const ratio       = 1 - rangePct / 100;
+  const rawTickDiff = Math.log(ratio) / Math.log(1.0001);
+  const tickDiffAbs = Math.floor(Math.abs(rawTickDiff) / Number(tickSpacing)) * Number(tickSpacing);
+  const currentTick = Number(slot0Data.tick);
+
+  let tickLower, tickUpper;
+  if (isC0Usdg || quoteToken === 'WETH' && pk.currency0.toLowerCase() === ethers.getAddress(WETH_ADDRESS).toLowerCase()) {
+    tickLower = alignDown(currentTick, Number(tickSpacing));
+    tickUpper = tickLower + tickDiffAbs;
+  } else {
+    tickUpper = alignDown(currentTick, Number(tickSpacing));
+    tickLower = tickUpper - tickDiffAbs;
+  }
+
+  const minTickAligned = Math.ceil(-887272 / Number(tickSpacing)) * Number(tickSpacing);
+  const maxTickAligned = Math.floor(887272 / Number(tickSpacing)) * Number(tickSpacing);
+  tickLower = Math.max(tickLower, minTickAligned);
+  tickUpper = Math.min(tickUpper, maxTickAligned);
+  if (tickLower >= tickUpper) throw new Error(`Invalid tick range: lower=${tickLower} upper=${tickUpper}`);
+
+  // Determine amount needed in quote token
+  const isC1Quote = !isC0Usdg && !(quoteToken === 'WETH' && pk.currency0.toLowerCase() === ethers.getAddress(WETH_ADDRESS).toLowerCase());
+
+  // Amount in quote token raw
+  let amountRaw;
+  let position;
+
+  if (quoteToken === 'USDG') {
+    amountRaw = ethers.parseUnits(amountUsd.toString(), 6);
+  } else {
+    // WETH: convert amountUsd to WETH units using current price
+    const sqrtP  = Number(slot0Data.sqrtPriceX96) / Math.pow(2, 96);
+    const rawNow = sqrtP * sqrtP;
+    const ethPrice = isC1Quote
+      ? rawNow * Math.pow(10, dec0 - dec1)
+      : Math.pow(10, dec1 - dec0) / rawNow;
+    const wethAmount = amountUsd / (ethPrice * 2000 / 2000); // ~2000 USD/ETH approx
+    amountRaw = ethers.parseUnits(wethAmount.toFixed(18), 18);
+  }
+
+  if (isC1Quote) {
+    position = v3sdk.Position.fromAmount1({ pool, tickLower, tickUpper, amount1: amountRaw.toString() });
+  } else {
+    position = v3sdk.Position.fromAmount0({ pool, tickLower, tickUpper, amount0: amountRaw.toString(), useFullPrecision: false });
+  }
+
+  const { amount0: mint0, amount1: mint1 } = position.mintAmounts;
+  const amount0Max = (BigInt(mint0.toString()) * 101n / 100n).toString();
+  const amount1Max = (BigInt(mint1.toString()) * 101n / 100n).toString();
+
+  // Pre-flight: ensure quote token balance
+  const quoteAmountNeeded = isC1Quote ? BigInt(mint1.toString()) : BigInt(mint0.toString());
+  const { swapTxHash } = await ensureQuoteTokenBalance(wallet, quoteToken, quoteAmountNeeded * 101n / 100n);
+
+  // Approve tokens to V3 POSM (no Permit2)
+  if (BigInt(amount0Max) > 0n && pk.currency0.toLowerCase() !== ethers.ZeroAddress.toLowerCase()) {
+    const t0 = new ethers.Contract(pk.currency0, ERC20_ABI, wallet);
+    const a0 = await t0.allowance(wallet.address, UNISWAP_V3_POSM_ADDRESS).catch(() => 0n);
+    if (a0 < BigInt(amount0Max)) await (await t0.approve(UNISWAP_V3_POSM_ADDRESS, ethers.MaxUint256)).wait();
+  }
+  if (BigInt(amount1Max) > 0n && pk.currency1.toLowerCase() !== ethers.ZeroAddress.toLowerCase()) {
+    const t1 = new ethers.Contract(pk.currency1, ERC20_ABI, wallet);
+    const a1 = await t1.allowance(wallet.address, UNISWAP_V3_POSM_ADDRESS).catch(() => 0n);
+    if (a1 < BigInt(amount1Max)) await (await t1.approve(UNISWAP_V3_POSM_ADDRESS, ethers.MaxUint256)).wait();
+  }
+
+  // Mint V3 position
+  const posm = new ethers.Contract(UNISWAP_V3_POSM_ADDRESS, UNISWAP_V3_POSM_ABI, wallet);
+  const txResponse = await posm.mint({
+    token0: pk.currency0,
+    token1: pk.currency1,
+    fee: Number(fee),
+    tickLower,
+    tickUpper,
+    amount0Desired: amount0Max,
+    amount1Desired: amount1Max,
+    amount0Min: 0n,
+    amount1Min: 0n,
+    recipient: wallet.address,
+    deadline,
+  });
+  const receipt = await txResponse.wait();
+
+  // Price info
+  const sqrtPNow    = Number(slot0Data.sqrtPriceX96) / Math.pow(2, 96);
+  const rawNowPrice = sqrtPNow * sqrtPNow;
+  const priceAtLower = isC0Usdg
+    ? Math.pow(10, dec1 - 6) / Math.pow(1.0001, tickLower)
+    : Math.pow(1.0001, tickLower) * Math.pow(10, dec0 - 6);
+  const priceAtUpper = isC0Usdg
+    ? Math.pow(10, dec1 - 6) / Math.pow(1.0001, tickUpper)
+    : Math.pow(1.0001, tickUpper) * Math.pow(10, dec0 - 6);
+  const priceNow = isC0Usdg
+    ? Math.pow(10, dec1 - 6) / rawNowPrice
+    : rawNowPrice * Math.pow(10, dec0 - 6);
+
+  return {
+    swapTxHash,
+    hash: receipt.hash,
+    fee: Number(fee),
+    tickSpacing: Number(tickSpacing),
+    tickLower,
+    tickUpper,
+    tokenSymbol: isC0Usdg ? sym1 : sym0,
+    priceMin: Math.min(priceAtLower, priceAtUpper),
+    priceMax: Math.max(priceAtLower, priceAtUpper),
+    priceNow,
+    quoteToken,
+    protocol: 'v3',
+  };
+}
+
 module.exports = {
   getExecutorAddress,
   getExecutorBalance,
   getExecutorPositions,
   executeCopyAddLiquidity,
   closePositionAndSwapToUsdg,
+  closeV3PositionAndSwapToUsdg,
   findUsdgPool,
   findAllUsdgPools,
+  findAllUsdgPoolsV3,
+  findAllUsdgPoolsCombined,
   getPoolSlot0,
   executeAutoDeployLp,
+  executeAutoDeployLpV3,
+  ensureQuoteTokenBalance,
+  getV3PositionDetails,
 };

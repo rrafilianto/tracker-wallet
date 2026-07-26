@@ -395,7 +395,7 @@ function formatExecutorPositions(positions, updatedAt = null) {
     totalEstHourlyUsd += estHourlyUsd;
 
     lines.push(
-      `\n${i + 1}. <b>${pair}</b> (${pos.fee}%) - Position #${pos.tokenId}` +
+      `\n${i + 1}. <b>${pair}</b> [${(pos.protocol || 'v4').toUpperCase()}] (${pos.fee}%) - Position #${pos.tokenId}` +
         depositLine +
         currentLine +
         unclaimedLine +

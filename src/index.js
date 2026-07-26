@@ -347,12 +347,15 @@ function tickToTokenPrice(tick, dec0, dec1, isC0Usdg) {
 
 // Helper: bangun teks + keyboard kartu konfirmasi deploy
 function buildDeployConfirmation(poolInfo, shortKey, idx, settings, updatedAt = null) {
-  const { isC0Usdg, dec0, dec1, pk, tick } = poolInfo;
+  const { isC0Usdg, dec0, dec1, pk, tick, protocol, quoteToken } = poolInfo;
   const tokenSym    = isC0Usdg ? poolInfo.sym1 : poolInfo.sym0;
+  const quoteSym    = quoteToken || 'USDG';
   const feePct      = (pk.fee / 10000).toFixed(2);
   const tvlStr      = formatTvl(poolInfo.tvlUsd);
   const amount      = settings.amount_usd;
   const rangePct    = settings.range_pct;
+  const protocolTag = (protocol || 'v4').toUpperCase();
+  const protoBadge  = protocol === 'v3' ? '🔷' : '🔶';
 
   // Hitung tick range
   const tickSpacing = Number(pk.tickSpacing);
@@ -363,7 +366,7 @@ function buildDeployConfirmation(poolInfo, shortKey, idx, settings, updatedAt = 
   const tickDiffAbs = Math.floor(Math.abs(rawTickDiff) / tickSpacing) * tickSpacing;
 
   let tickLower, tickUpper;
-  if (isC0Usdg) {
+  if (isC0Usdg || (quoteSym === 'WETH' && pk.currency0?.toLowerCase() === poolInfo.quoteTokenAddress?.toLowerCase())) {
     tickLower = alignDown(tick, tickSpacing);
     tickUpper = tickLower + tickDiffAbs;
   } else {
@@ -390,11 +393,18 @@ function buildDeployConfirmation(poolInfo, shortKey, idx, settings, updatedAt = 
 
   let text =
     `📋 <b>Konfirmasi Deploy LP</b>\n\n` +
-    `🏊 Pair: <b>${tokenSym}/USDG</b>\n` +
+    `${protoBadge} Protocol: <b>Uniswap ${protocolTag}</b>\n` +
+    `🏊 Pair: <b>${tokenSym}/${quoteSym}</b>\n` +
     `💸 Fee Tier: <b>${feePct}%</b>\n` +
     `📊 TVL Pool: <b>~${tvlStr}</b>\n` +
-    `💰 Amount: <b>$${amount} USDG</b>\n` +
+    `💰 Amount: <b>$${amount} ${quoteSym}</b>\n` +
     `📉 Range: <b>${rangeStr}</b>`;
+
+  // Quote token warning
+  if (quoteSym !== 'USDG') {
+    text += `\n\n⚠️ <i>Quote token: ${quoteSym}</i>\n`;
+    text += `🔄 <i>Jika saldo ${quoteSym} tidak cukup, sistem akan auto-swap USDG → ${quoteSym} (deficit only) sebelum deploy.</i>`;
+  }
 
   if (updatedAt) text += `\n🕒 <i>Refreshed: ${updatedAt}</i>`;
   text += `\n\nLanjutkan deploy?`;
@@ -421,19 +431,19 @@ async function handleAutoDeploy(msg, addr) {
 
   // Kirim pesan loading dulu
   const loadingMsg = await send(cid,
-    `🔍 <b>Mencari pool USDG...</b>\n` +
+    `🔍 <b>Mencari pool USDG/WETH...</b>\n` +
     `Token: <code>${addr}</code>\n\n` +
-    `⏳ Sedang fetch data pool dari Uniswap V4...`
+    `⏳ Sedang fetch data pool dari Uniswap V3 & V4...`
   );
 
   try {
-    const pools = await uniswapExecutor.findAllUsdgPools(addr);
+    const pools = await uniswapExecutor.findAllUsdgPoolsCombined(addr);
 
     if (pools.length === 0) {
       await bot.editMessageText(
-        `❌ <b>Tidak ada pool USDG ditemukan</b>\n` +
+        `❌ <b>Tidak ada pool ditemukan</b>\n` +
         `Token: <code>${addr}</code>\n\n` +
-        `Token ini belum memiliki pool aktif di Uniswap V4 (semua fee tier dicek).`,
+        `Token ini belum memiliki pool aktif di Uniswap V3 atau V4.`,
         { chat_id: cid, message_id: loadingMsg.message_id, parse_mode: 'HTML' }
       );
       return;
@@ -444,19 +454,22 @@ async function handleAutoDeploy(msg, addr) {
 
     const tokenSym = pools[0].isC0Usdg ? pools[0].sym1 : pools[0].sym0;
 
-    // Bangun keyboard — satu baris per pool
+    // Bangun keyboard — satu baris per pool, dengan badge V3/V4
     const poolButtons = pools.map((p, idx) => {
-      const feePct = (p.pk.fee / 10000).toFixed(2);
-      const tvlStr = formatTvl(p.tvlUsd);
+      const feePct    = (p.pk.fee / 10000).toFixed(2);
+      const tvlStr    = formatTvl(p.tvlUsd);
+      const protoBadge = p.protocol === 'v3' ? '🔷' : '🔶';
+      const protoTag   = (p.protocol || 'v4').toUpperCase();
+      const quoteTag   = (p.quoteToken && p.quoteToken !== 'USDG') ? ` [${p.quoteToken}]` : '';
       return [{
-        text: `🏊 ${feePct}% fee  |  TVL ~${tvlStr}`,
+        text: `${protoBadge} ${protoTag} │ ${feePct}% │ TVL ~${tvlStr}${quoteTag}`,
         callback_data: `pool_deploy_${shortKey}_${idx}`,
       }];
     });
     poolButtons.push([{ text: '❌ Cancel', callback_data: `pool_cancel_${shortKey}` }]);
 
     const headerText =
-      `🌊 <b>Pool USDG tersedia — ${tokenSym}</b>\n\n` +
+      `🌊 <b>Pool tersedia — ${tokenSym}</b>\n\n` +
       `💰 Amount: <b>$${deploySettings.amount_usd} USDG</b>\n` +
       `📉 Range: <b>-${deploySettings.range_pct}% di bawah harga</b>\n` +
       `<i>Ubah via /settings</i>\n\n` +
@@ -507,13 +520,13 @@ bot.on('callback_query', async (query) => {
         `⏳ Sedang fetch data pool dari Uniswap V4...`
       );
 
-      const pools = await uniswapExecutor.findAllUsdgPools(tokenAddr);
+      const pools = await uniswapExecutor.findAllUsdgPoolsCombined(tokenAddr);
 
       if (pools.length === 0) {
         await bot.editMessageText(
-          `❌ <b>Tidak ada pool USDG ditemukan</b>\n` +
+          `❌ <b>Tidak ada pool ditemukan</b>\n` +
           `Token: <b>${tokenSym}</b>\n\n` +
-          `Token ini belum memiliki pool aktif di Uniswap V4.`,
+          `Token ini belum memiliki pool aktif di Uniswap V3 atau V4.`,
           { chat_id: cid, message_id: loadingMsg.message_id, parse_mode: 'HTML' }
         );
         return;
@@ -522,12 +535,15 @@ bot.on('callback_query', async (query) => {
       // Simpan ke pendingPoolSelections (reuse flow yang sama dengan auto-deploy)
       pendingPoolSelections.set(shortKey, { tokenAddr, pools });
 
-      // Bangun keyboard pilihan pool
+      // Bangun keyboard pilihan pool dengan badge V3/V4
       const poolButtons = pools.map((p, idx) => {
-        const feePct = (p.pk.fee / 10000).toFixed(2);
-        const tvlStr = formatTvl(p.tvlUsd);
+        const feePct    = (p.pk.fee / 10000).toFixed(2);
+        const tvlStr    = formatTvl(p.tvlUsd);
+        const protoBadge = p.protocol === 'v3' ? '🔷' : '🔶';
+        const protoTag   = (p.protocol || 'v4').toUpperCase();
+        const quoteTag   = (p.quoteToken && p.quoteToken !== 'USDG') ? ` [${p.quoteToken}]` : '';
         return [{
-          text: `🏊 ${feePct}% fee  |  TVL ~${tvlStr}`,
+          text: `${protoBadge} ${protoTag} │ ${feePct}% │ TVL ~${tvlStr}${quoteTag}`,
           callback_data: `pool_deploy_${shortKey}_${idx}`,
         }];
       });
@@ -552,8 +568,22 @@ bot.on('callback_query', async (query) => {
     const tokenId = data.replace('close_pos_', '');
     await bot.answerCallbackQuery(query.id, { text: `⏳ Closing Position #${tokenId} & Swapping to USDG...` });
     try {
-      await send(cid, `⏳ <b>Closing Position #${tokenId} & Swapping non-USDG tokens to USDG…</b>`);
-      const res = await uniswapExecutor.closePositionAndSwapToUsdg(tokenId);
+      await send(cid, `⏳ <b>Closing Position #${tokenId} & Swapping tokens to USDG…</b>`);
+
+      // Detect if this is a V3 position by checking pending positions or querying on-chain
+      // We check V3 POSM ownerOf first
+      let res;
+      try {
+        // Try V3 first
+        const v3Detail = await uniswapExecutor.getV3PositionDetails(tokenId, (await uniswapExecutor.getExecutorAddress()));
+        if (v3Detail) {
+          res = await uniswapExecutor.closeV3PositionAndSwapToUsdg(tokenId);
+        } else {
+          res = await uniswapExecutor.closePositionAndSwapToUsdg(tokenId);
+        }
+      } catch {
+        res = await uniswapExecutor.closePositionAndSwapToUsdg(tokenId);
+      }
       
       let msg = `✅ <b>Position #${tokenId} Closed Successfully!</b>\n\n`;
       msg += `🔹 <b>Close LP Tx:</b> https://robinhoodchain.blockscout.com/tx/${res.closeTxHash}\n`;
@@ -661,17 +691,25 @@ bot.on('callback_query', async (query) => {
       const poolInfo = selection.pools[idx];
       if (!poolInfo) throw new Error('Pool data tidak ditemukan.');
 
-      const tokenSym = poolInfo.isC0Usdg ? poolInfo.sym1 : poolInfo.sym0;
-      const feePct = (poolInfo.pk.fee / 10000).toFixed(2);
-      const tvlStr = formatTvl(poolInfo.tvlUsd);
+      const tokenSym  = poolInfo.isC0Usdg ? poolInfo.sym1 : poolInfo.sym0;
+      const quoteSym   = poolInfo.quoteToken || 'USDG';
+      const feePct     = (poolInfo.pk.fee / 10000).toFixed(2);
+      const tvlStr     = formatTvl(poolInfo.tvlUsd);
+      const protoLabel = (poolInfo.protocol || 'v4').toUpperCase();
 
       await send(cid,
-        `⏳ <b>Deploying LP ${tokenSym}/USDG</b>\n` +
+        `⏳ <b>Deploying LP ${tokenSym}/${quoteSym} [${protoLabel}]</b>\n` +
         `Fee: <b>${feePct}%</b> | TVL ~${tvlStr}\n` +
-        `Amount: <b>$${amount} USDG</b> | Range: <b>-${rangePct}%</b>…`
+        `Amount: <b>$${amount} ${quoteSym}</b> | Range: <b>-${rangePct}%</b>…`
       );
 
-      const result = await uniswapExecutor.executeAutoDeployLp(selection.tokenAddr, amount, poolInfo, rangePct);
+      // Dispatch to V3 or V4 executor
+      let result;
+      if (poolInfo.isV3) {
+        result = await uniswapExecutor.executeAutoDeployLpV3(selection.tokenAddr, amount, poolInfo, rangePct);
+      } else {
+        result = await uniswapExecutor.executeAutoDeployLp(selection.tokenAddr, amount, poolInfo, rangePct);
+      }
       pendingPoolSelections.delete(shortKey);
 
       const isInvalidPrice = result.priceMin >= 1e12 || result.priceMax >= 1e12 || result.priceNow >= 1e12;
@@ -679,13 +717,19 @@ bot.on('callback_query', async (query) => {
         ? `${formatPriceCompact(result.priceMin)}–${formatPriceCompact(result.priceMax)} (now ${formatPriceCompact(result.priceNow)})`
         : `${result.tickLower} → ${result.tickUpper}`;
 
-      await send(cid,
-        `✅ <b>LP Deployed Successfully!</b>\n` +
-        `Pair: <b>${result.tokenSymbol}/USDG</b>\n` +
+      let successMsg =
+        `✅ <b>LP Deployed Successfully! [${protoLabel}]</b>\n` +
+        `Pair: <b>${result.tokenSymbol}/${quoteSym}</b>\n` +
         `Fee Tier: <b>${(result.fee / 10000).toFixed(2)}%</b>\n` +
-        `Range: <b>${rangeStr}</b>\n` +
-        `Tx: https://robinhoodchain.blockscout.com/tx/${result.hash}`
-      );
+        `Range: <b>${rangeStr}</b>\n`;
+
+      // Show swap tx if it happened
+      if (result.swapTxHash) {
+        successMsg += `🔄 <b>Swap USDG→${quoteSym} Tx:</b> https://robinhoodchain.blockscout.com/tx/${result.swapTxHash}\n`;
+      }
+      successMsg += `📌 <b>Deploy Tx:</b> https://robinhoodchain.blockscout.com/tx/${result.hash}`;
+
+      await send(cid, successMsg);
     } catch (e) {
       await send(cid, `❌ Deploy gagal: ${e.message}`);
     }
