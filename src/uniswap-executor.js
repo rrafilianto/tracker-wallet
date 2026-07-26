@@ -1086,22 +1086,19 @@ async function executeAutoDeployLp(tokenAddress, amountUsd = 50, preFoundPool = 
 // Returns all active V3 pools for a token where quote token is USDG or WETH.
 async function findAllUsdgPoolsV3(tokenAddress) {
   if (!tokenAddress) throw new Error('tokenAddress required');
-  if (tokenAddress.toLowerCase() === USDG_ADDRESS.toLowerCase()) {
-    throw new Error('Cannot deploy USDG/USDG pool');
-  }
-
-  const provider = getProvider();
-  const factory = new ethers.Contract(UNISWAP_V3_FACTORY_ADDRESS, UNISWAP_V3_FACTORY_ABI, provider);
-
   const tokenAddr = ethers.getAddress(tokenAddress);
   const usdgAddr  = ethers.getAddress(USDG_ADDRESS);
   const wethAddr  = ethers.getAddress(WETH_ADDRESS);
 
-  let tokenDec = 18, tokenSym = 'TOKEN';
-  try {
-    const c = new ethers.Contract(tokenAddr, ERC20_ABI, provider);
-    [tokenDec, tokenSym] = await Promise.all([c.decimals().then(Number), c.symbol()]);
-  } catch {}
+  if (tokenAddr.toLowerCase() === usdgAddr.toLowerCase()) {
+    throw new Error('Cannot deploy USDG/USDG pool');
+  }
+  if (tokenAddr.toLowerCase() === wethAddr.toLowerCase()) {
+    throw new Error('Cannot deploy WETH/WETH pool');
+  }
+
+  const provider = getProvider();
+  const factory  = new ethers.Contract(UNISWAP_V3_FACTORY_ADDRESS, UNISWAP_V3_FACTORY_ABI, provider);
 
   const pools = [];
 
@@ -1112,6 +1109,8 @@ async function findAllUsdgPoolsV3(tokenAddress) {
   ];
 
   for (const { qAddr, qSym, qDec, label } of quotePairs) {
+    if (tokenAddr.toLowerCase() === qAddr.toLowerCase()) continue;
+
     for (const { fee, tickSpacing } of V3_FEE_TIERS) {
       try {
         const poolAddr = await factory.getPool(tokenAddr, qAddr, fee);
@@ -1127,16 +1126,23 @@ async function findAllUsdgPoolsV3(tokenAddress) {
 
         if (!slot0Data || slot0Data.sqrtPriceX96 === 0n) continue;
 
-        // Determine ordering
-        const isQ0 = t0.toLowerCase() === qAddr.toLowerCase();
-        const currency0 = t0;
-        const currency1 = t1;
-        const isC0Usdg  = isQ0 && label === 'USDG';
-        const isC1Usdg  = !isQ0 && label === 'USDG';
-        const dec0      = isQ0 ? qDec : tokenDec;
-        const dec1      = isQ0 ? tokenDec : qDec;
-        const sym0      = isQ0 ? qSym : tokenSym;
-        const sym1      = isQ0 ? tokenSym : qSym;
+        // Fetch exact symbols and decimals for token0 and token1 directly from contracts
+        let sym0 = 'TOKEN0', sym1 = 'TOKEN1', dec0 = 18, dec1 = 18;
+
+        if (t0.toLowerCase() === usdgAddr.toLowerCase()) { sym0 = 'USDG'; dec0 = 6; }
+        else if (t0.toLowerCase() === wethAddr.toLowerCase()) { sym0 = 'WETH'; dec0 = 18; }
+        else {
+          try { const c0 = new ethers.Contract(t0, ERC20_ABI, provider); [dec0, sym0] = await Promise.all([c0.decimals().then(Number), c0.symbol()]); } catch {}
+        }
+
+        if (t1.toLowerCase() === usdgAddr.toLowerCase()) { sym1 = 'USDG'; dec1 = 6; }
+        else if (t1.toLowerCase() === wethAddr.toLowerCase()) { sym1 = 'WETH'; dec1 = 18; }
+        else {
+          try { const c1 = new ethers.Contract(t1, ERC20_ABI, provider); [dec1, sym1] = await Promise.all([c1.decimals().then(Number), c1.symbol()]); } catch {}
+        }
+
+        const isC0Usdg = t0.toLowerCase() === usdgAddr.toLowerCase();
+        const isC1Usdg = t1.toLowerCase() === usdgAddr.toLowerCase();
 
         // Estimate TVL
         let tvlUsd = 0;
@@ -1150,6 +1156,7 @@ async function findAllUsdgPoolsV3(tokenAddress) {
                 : 2 * liqNum / sqrtP / 1e6;
             } else {
               // WETH: rough ETH price ~$2000
+              const isQ0 = t0.toLowerCase() === qAddr.toLowerCase();
               tvlUsd = isQ0
                 ? 2 * liqNum / sqrtP / 1e18 * 2000
                 : 2 * liqNum * sqrtP / 1e18 * 2000;
@@ -1158,7 +1165,7 @@ async function findAllUsdgPoolsV3(tokenAddress) {
         } catch {}
 
         pools.push({
-          pk: { currency0, currency1, fee, tickSpacing },
+          pk: { currency0: t0, currency1: t1, fee, tickSpacing },
           poolId: poolAddr,
           sqrtPriceX96: slot0Data.sqrtPriceX96.toString(),
           tick: Number(slot0Data.tick),

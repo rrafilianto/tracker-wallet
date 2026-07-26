@@ -407,10 +407,11 @@ function formatExecutorPositions(positions, updatedAt = null) {
         `\n   Price Range: <b>${rangeStr}</b>`,
     );
 
+    const protoKey = pos.isV3 || pos.protocol === 'v3' ? 'v3' : 'v4';
     keyboard.push([
       {
         text: `❌ Close #${pos.tokenId} (${pair} → USDG)`,
-        callback_data: `close_pos_${pos.tokenId}`,
+        callback_data: `close_pos_${protoKey}_${pos.tokenId}`,
       },
     ]);
   });

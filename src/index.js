@@ -333,23 +333,36 @@ function formatPriceCompact(price) {
   return `0.0${sub}${sigDigits}`;
 }
 
-// Konversi tick ke harga token dalam USDG (human-readable)
-function tickToTokenPrice(tick, dec0, dec1, isC0Usdg) {
+// Konversi tick ke harga token (human-readable USD equivalent)
+function tickToTokenPrice(tick, poolInfo) {
+  const { dec0, dec1, pk, quoteToken, quoteTokenAddress, sym0, isC0Usdg } = poolInfo;
   const rawPrice = Math.pow(1.0001, tick);
-  if (isC0Usdg) {
-    // c0=USDG(6 dec), c1=TOKEN — harga TOKEN dalam USDG = 10^(dec1-6) / rawPrice
-    return Math.pow(10, dec1 - 6) / rawPrice;
+
+  const qAddr = quoteTokenAddress ? quoteTokenAddress.toLowerCase() : '';
+  const isQ0  = isC0Usdg || (pk.currency0 && pk.currency0.toLowerCase() === qAddr) || sym0 === quoteToken;
+
+  const quoteUsdPrice = (quoteToken === 'WETH' || quoteToken === 'ETH') ? 2000 : 1; // rough ETH price multiplier for USD display
+
+  if (isQ0) {
+    // c0=QUOTE, c1=TOKEN — harga TOKEN dalam QUOTE = 10^(dec1-dec0) / rawPrice
+    const priceInQuote = Math.pow(10, dec1 - dec0) / rawPrice;
+    return priceInQuote * quoteUsdPrice;
   } else {
-    // c0=TOKEN, c1=USDG(6 dec) — harga TOKEN dalam USDG = rawPrice × 10^(dec0-6)
-    return rawPrice * Math.pow(10, dec0 - 6);
+    // c0=TOKEN, c1=QUOTE — harga TOKEN dalam QUOTE = rawPrice × 10^(dec0-dec1)
+    const priceInQuote = rawPrice * Math.pow(10, dec0 - dec1);
+    return priceInQuote * quoteUsdPrice;
   }
 }
 
 // Helper: bangun teks + keyboard kartu konfirmasi deploy
 function buildDeployConfirmation(poolInfo, shortKey, idx, settings, updatedAt = null) {
-  const { isC0Usdg, dec0, dec1, pk, tick, protocol, quoteToken } = poolInfo;
-  const tokenSym    = isC0Usdg ? poolInfo.sym1 : poolInfo.sym0;
-  const quoteSym    = quoteToken || 'USDG';
+  const { dec0, dec1, pk, tick, protocol, quoteToken, quoteTokenAddress, sym0, sym1, isC0Usdg } = poolInfo;
+
+  const qAddr  = quoteTokenAddress ? quoteTokenAddress.toLowerCase() : '';
+  const isQ0   = isC0Usdg || (pk.currency0 && pk.currency0.toLowerCase() === qAddr) || sym0 === quoteToken;
+
+  const tokenSym    = isQ0 ? sym1 : sym0;
+  const quoteSym    = quoteToken || (isQ0 ? sym0 : sym1);
   const feePct      = (pk.fee / 10000).toFixed(2);
   const tvlStr      = formatTvl(poolInfo.tvlUsd);
   const amount      = settings.amount_usd;
@@ -366,7 +379,7 @@ function buildDeployConfirmation(poolInfo, shortKey, idx, settings, updatedAt = 
   const tickDiffAbs = Math.floor(Math.abs(rawTickDiff) / tickSpacing) * tickSpacing;
 
   let tickLower, tickUpper;
-  if (isC0Usdg || (quoteSym === 'WETH' && pk.currency0?.toLowerCase() === poolInfo.quoteTokenAddress?.toLowerCase())) {
+  if (isQ0) {
     tickLower = alignDown(tick, tickSpacing);
     tickUpper = tickLower + tickDiffAbs;
   } else {
@@ -374,19 +387,15 @@ function buildDeployConfirmation(poolInfo, shortKey, idx, settings, updatedAt = 
     tickLower = tickUpper - tickDiffAbs;
   }
 
-  const priceAtLower = tickToTokenPrice(tickLower, dec0, dec1, isC0Usdg);
-  const priceAtUpper = tickToTokenPrice(tickUpper, dec0, dec1, isC0Usdg);
+  const priceAtLower = tickToTokenPrice(tickLower, poolInfo);
+  const priceAtUpper = tickToTokenPrice(tickUpper, poolInfo);
 
   const priceMin = Math.min(priceAtLower, priceAtUpper);
   const priceMax = Math.max(priceAtLower, priceAtUpper);
 
-  const sqrtP    = Number(poolInfo.sqrtPriceX96) / Math.pow(2, 96);
-  const rawNow   = sqrtP * sqrtP;
-  const priceNow = isC0Usdg
-    ? Math.pow(10, dec1 - 6) / rawNow
-    : rawNow * Math.pow(10, dec0 - 6);
+  const priceNow = tickToTokenPrice(tick, poolInfo);
 
-  const isInvalidPrice = priceMin >= 1e12 || priceMax >= 1e12 || priceNow >= 1e12;
+  const isInvalidPrice = !isFinite(priceMin) || !isFinite(priceMax) || !isFinite(priceNow) || priceMin <= 0;
   const rangeStr = isInvalidPrice
     ? 'N/A (Empty / Uninitialized Pool)'
     : `${formatPriceCompact(priceMin)}–${formatPriceCompact(priceMax)} (now ${formatPriceCompact(priceNow)})`;
@@ -565,24 +574,35 @@ bot.on('callback_query', async (query) => {
       await send(cid, `❌ Copy Add Liquidity failed: ${e.message}`);
     }
   } else if (data.startsWith('close_pos_')) {
-    const tokenId = data.replace('close_pos_', '');
+    const raw = data.replace('close_pos_', '');
+    let protocol = null;
+    let tokenId = raw;
+
+    if (raw.startsWith('v3_')) {
+      protocol = 'v3';
+      tokenId = raw.replace('v3_', '');
+    } else if (raw.startsWith('v4_')) {
+      protocol = 'v4';
+      tokenId = raw.replace('v4_', '');
+    }
+
     await bot.answerCallbackQuery(query.id, { text: `⏳ Closing Position #${tokenId} & Swapping to USDG...` });
     try {
       await send(cid, `⏳ <b>Closing Position #${tokenId} & Swapping tokens to USDG…</b>`);
 
-      // Detect if this is a V3 position by checking pending positions or querying on-chain
-      // We check V3 POSM ownerOf first
       let res;
-      try {
-        // Try V3 first
-        const v3Detail = await uniswapExecutor.getV3PositionDetails(tokenId, (await uniswapExecutor.getExecutorAddress()));
+      if (protocol === 'v3') {
+        res = await uniswapExecutor.closeV3PositionAndSwapToUsdg(tokenId);
+      } else if (protocol === 'v4') {
+        res = await uniswapExecutor.closePositionAndSwapToUsdg(tokenId);
+      } else {
+        // Legacy fallback check
+        const v3Detail = await uniswapExecutor.getV3PositionDetails(tokenId, (await uniswapExecutor.getExecutorAddress())).catch(() => null);
         if (v3Detail) {
           res = await uniswapExecutor.closeV3PositionAndSwapToUsdg(tokenId);
         } else {
           res = await uniswapExecutor.closePositionAndSwapToUsdg(tokenId);
         }
-      } catch {
-        res = await uniswapExecutor.closePositionAndSwapToUsdg(tokenId);
       }
       
       let msg = `✅ <b>Position #${tokenId} Closed Successfully!</b>\n\n`;
