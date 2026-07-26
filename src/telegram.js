@@ -270,7 +270,9 @@ function formatExecutorBalance(bal) {
   ];
   if (bal.tokens && bal.tokens.length > 0) {
     bal.tokens.forEach((t) => {
-      lines.push(`• <b>${t.symbol}</b>: ${Number(t.balance).toLocaleString()}`);
+      const num = Number(t.balance);
+      const formatted = num < 0.01 && num > 0 ? num.toFixed(6) : num.toLocaleString();
+      lines.push(`• <b>${t.symbol}</b>: ${formatted}`);
     });
   } else {
     lines.push('• No ERC-20 token balances found.');
