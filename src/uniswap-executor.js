@@ -521,18 +521,31 @@ async function getExecutorPositions() {
         const v4Detail = await getV4PositionDetails(tid, wallet.address);
         if (!v4Detail) return null;
 
-        // Check if static initial deposit is already cached on disk
+        // Check if static initial deposit is already cached on disk (retry/fallback if depTotalUsd is 0/missing)
         let depData = posCache[cacheKey];
-        if (!depData || depData.depTotalUsd === undefined) {
+        if (!depData || !depData.depTotalUsd) {
           const mintTxHash = nftMintTxMap[tid];
           const fetchedDep = await fetchMintDeposit(mintTxHash, wallet.address, null, null, v4Detail.dec0, v4Detail.dec1, 0n, v4Detail.sym0, v4Detail.sym1);
-          const mintTsStr = nftMintTsMap[tid];
-          depData = {
-            depAmount0: fetchedDep.depAmount0,
-            depAmount1: fetchedDep.depAmount1,
-            depTotalUsd: fetchedDep.depTotalUsd,
-            mintTsStr: mintTsStr || null,
-          };
+          const mintTsStr = nftMintTsMap[tid] || depData?.mintTsStr;
+          if (fetchedDep && (fetchedDep.depTotalUsd > 0 || fetchedDep.depAmount0 > 0 || fetchedDep.depAmount1 > 0)) {
+            depData = {
+              depAmount0: fetchedDep.depAmount0,
+              depAmount1: fetchedDep.depAmount1,
+              depTotalUsd: fetchedDep.depTotalUsd,
+              mintTsStr: mintTsStr || null,
+              entryPriceUsd: depData?.entryPriceUsd || 0,
+            };
+          } else {
+            // Fallback estimation from position value if Blockscout indexing missed the mint transfer
+            const fallbackUsd = v4Detail.valueUsd > 0 ? Math.max(0, v4Detail.valueUsd - v4Detail.feeUsd) : 0;
+            depData = {
+              depAmount0: v4Detail.amount0 || 0,
+              depAmount1: v4Detail.amount1 || 0,
+              depTotalUsd: fallbackUsd,
+              mintTsStr: mintTsStr || null,
+              entryPriceUsd: depData?.entryPriceUsd || 0,
+            };
+          }
           posCache[cacheKey] = depData;
           cacheUpdated = true;
         }
