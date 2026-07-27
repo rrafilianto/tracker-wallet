@@ -1,3 +1,5 @@
 node_modules/
 .env
 wallets.json
+settings.json
+positions_cache.json

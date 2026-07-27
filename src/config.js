@@ -3,8 +3,9 @@ const fs = require('fs');
 
 require('dotenv').config({ path: path.resolve(__dirname, '..', '.env') });
 
-const WALLETS_PATH  = path.resolve(__dirname, '..', 'wallets.json');
-const SETTINGS_PATH = path.resolve(__dirname, '..', 'settings.json');
+const WALLETS_PATH         = path.resolve(__dirname, '..', 'wallets.json');
+const SETTINGS_PATH        = path.resolve(__dirname, '..', 'settings.json');
+const POSITIONS_CACHE_PATH = path.resolve(__dirname, '..', 'positions_cache.json');
 
 function loadWallets() {
   try {
@@ -37,6 +38,23 @@ function saveSettings(settings) {
   fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2));
 }
 
+function loadPositionsCache() {
+  try {
+    const raw = fs.readFileSync(POSITIONS_CACHE_PATH, 'utf-8');
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+function savePositionsCache(cache) {
+  try {
+    fs.writeFileSync(POSITIONS_CACHE_PATH, JSON.stringify(cache, null, 2));
+  } catch (err) {
+    console.error('[CACHE] Error saving positions cache:', err.message);
+  }
+}
+
 module.exports = {
   GMGN_API_KEY: process.env.GMGN_API_KEY,
   TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN,
@@ -47,4 +65,7 @@ module.exports = {
   saveWallets,
   loadSettings,
   saveSettings,
+  loadPositionsCache,
+  savePositionsCache,
 };
+

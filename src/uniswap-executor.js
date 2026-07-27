@@ -4,6 +4,7 @@ const v4sdk = require('@uniswap/v4-sdk');
 const { Pool, Position } = v4sdk;
 const v3sdk = require('@uniswap/v3-sdk');
 const rpcDecoder = require('./rpc-decoder');
+const config = require('./config');
 
 // Uniswap V4 fee tiers (supports any fee tier, including >1% fees: 2%, 3%, 5%, 10%)
 const ALL_FEE_TIERS = [
@@ -444,192 +445,206 @@ async function getExecutorBalance() {
 
 async function getExecutorPositions() {
   const wallet = getWallet();
-  const provider = wallet.provider;
   const positions = [];
 
-  // Fetch NFT mint timestamps & mint tx hashes dynamically from Blockscout
+  // Load persistent static disk cache
+  const posCache = config.loadPositionsCache();
+  let cacheUpdated = false;
+
+  // 1. Fetch Blockscout API data in parallel
+  const [dataTs, dataV4, dataV3] = await Promise.all([
+    fetch(`https://robinhoodchain.blockscout.com/api/v2/addresses/${wallet.address}/token-transfers?type=ERC-721`).then(r => r.json()).catch(() => ({})),
+    fetch(`https://robinhoodchain.blockscout.com/api/v2/addresses/${wallet.address}/nft`).then(r => r.json()).catch(() => ({})),
+    fetch(`https://robinhoodchain.blockscout.com/api/v2/addresses/${wallet.address}/nft?contract_address_hash=${UNISWAP_V3_POSM_ADDRESS}`).then(r => r.json()).catch(() => ({}))
+  ]);
+
   const nftMintTsMap = {};
   const nftMintTxMap = {};
-  try {
-    const resTs = await fetch(`https://robinhoodchain.blockscout.com/api/v2/addresses/${wallet.address}/token-transfers?type=ERC-721`);
-    const dataTs = await resTs.json();
-    if (dataTs.items) {
-      dataTs.items.forEach(item => {
-        const tid = item.total?.token_id;
-        const txHash = item.transaction_hash || item.tx_hash;
-        if (tid && !nftMintTsMap[tid]) {
-          if (item.timestamp) nftMintTsMap[tid] = item.timestamp;
-          if (txHash) nftMintTxMap[tid] = txHash;
-        }
-      });
-    }
-  } catch {
-    // Ignore age fetch error
+  if (dataTs.items) {
+    dataTs.items.forEach(item => {
+      const tid = item.total?.token_id;
+      const txHash = item.transaction_hash || item.tx_hash;
+      if (tid && !nftMintTsMap[tid]) {
+        if (item.timestamp) nftMintTsMap[tid] = item.timestamp;
+        if (txHash) nftMintTxMap[tid] = txHash;
+      }
+    });
   }
 
-  // 2. Check Uniswap V4 Positions (UNI-V4-POSM - 100% Pure Dynamic On-Chain Query)
-  try {
-    const url = `https://robinhoodchain.blockscout.com/api/v2/addresses/${wallet.address}/nft`;
-    const res = await fetch(url);
-    const data = await res.json();
+  // 2. Process Uniswap V4 Positions in parallel with disk caching for static deposit data
+  if (dataV4.items) {
+    const v4Promises = dataV4.items.map(async (item) => {
+      const tid = (item.id || item.token_id).toString();
+      const cacheKey = `v4_${tid}`;
 
-    if (data.items) {
-      for (const item of data.items) {
-        const tid = (item.id || item.token_id).toString();
-        try {
-          const v4Detail = await getV4PositionDetails(tid, wallet.address);
-          if (!v4Detail) continue;
+      try {
+        const v4Detail = await getV4PositionDetails(tid, wallet.address);
+        if (!v4Detail) return null;
 
-          // Initial deposit calculation for V4
+        // Check if static initial deposit is already cached on disk
+        let depData = posCache[cacheKey];
+        if (!depData || depData.depTotalUsd === undefined) {
           const mintTxHash = nftMintTxMap[tid];
-          const { depAmount0, depAmount1, depTotalUsd } = await fetchMintDeposit(mintTxHash, wallet.address, null, null, v4Detail.dec0, v4Detail.dec1, 0n, v4Detail.sym0, v4Detail.sym1);
-
+          const fetchedDep = await fetchMintDeposit(mintTxHash, wallet.address, null, null, v4Detail.dec0, v4Detail.dec1, 0n, v4Detail.sym0, v4Detail.sym1);
           const mintTsStr = nftMintTsMap[tid];
-          let ageHours = 24;
-          if (mintTsStr) {
-            const ageMs = Date.now() - new Date(mintTsStr).getTime();
-            ageHours = Math.max(0.5, ageMs / (1000 * 3600));
-          }
-
-          const totalPosUsd = v4Detail.valueUsd;
-          const pnlUsd = depTotalUsd > 0 ? totalPosUsd - depTotalUsd : 0;
-          const pnlPercent = depTotalUsd > 0 ? (pnlUsd / depTotalUsd) * 100 : 0;
-
-          const estHourlyUsd = v4Detail.feeUsd > 0 ? v4Detail.feeUsd / ageHours : 0;
-          const baseForYield = depTotalUsd > 0 ? depTotalUsd : (v4Detail.valueUsd > 0 ? v4Detail.valueUsd : 0);
-          const estHourlyPercent = baseForYield > 0 ? (estHourlyUsd / baseForYield) * 100 : 0;
-
-          const ageStr = formatAgeFromTimestamp(nftMintTsMap[tid]);
-
-          // Compute price range and inRange status
-          const tickCurrent = Number(v4Detail.tickCurrent);
-          const tickLower = Number(v4Detail.tickLower);
-          const tickUpper = Number(v4Detail.tickUpper);
-          const inRange = tickCurrent >= tickLower && tickCurrent <= tickUpper;
-
-          let priceA = 0;
-          let priceB = 0;
-          let priceNow = 0;
-          const sqrtP = Number(v4Detail.sqrtPriceX96) / Math.pow(2, 96);
-          const rawNow = sqrtP * sqrtP;
-
-          if (v4Detail.isC0Usdg) {
-            priceA = Math.pow(10, v4Detail.dec1 - 6) / Math.pow(1.0001, tickLower);
-            priceB = Math.pow(10, v4Detail.dec1 - 6) / Math.pow(1.0001, tickUpper);
-            priceNow = Math.pow(10, v4Detail.dec1 - 6) / rawNow;
-          } else if (v4Detail.isC1Usdg) {
-            priceA = Math.pow(1.0001, tickLower) * Math.pow(10, v4Detail.dec0 - 6);
-            priceB = Math.pow(1.0001, tickUpper) * Math.pow(10, v4Detail.dec0 - 6);
-            priceNow = rawNow * Math.pow(10, v4Detail.dec0 - 6);
-          } else {
-            priceA = Math.pow(1.0001, tickLower) * Math.pow(10, v4Detail.dec0 - v4Detail.dec1);
-            priceB = Math.pow(1.0001, tickUpper) * Math.pow(10, v4Detail.dec0 - v4Detail.dec1);
-            priceNow = rawNow * Math.pow(10, v4Detail.dec0 - v4Detail.dec1);
-          }
-
-          const priceMin = Math.min(priceA, priceB);
-          const priceMax = Math.max(priceA, priceB);
-
-          positions.push({
-            tokenId: tid,
-            symbol0: v4Detail.sym0,
-            symbol1: v4Detail.sym1,
-            amount0: v4Detail.amount0,
-            amount1: v4Detail.amount1,
-            totalUsd: v4Detail.valueUsd - v4Detail.feeUsd,
-            depAmount0,
-            depAmount1,
-            depTotalUsd,
-            unclaimed0: v4Detail.unclaimed0,
-            unclaimed1: v4Detail.unclaimed1,
-            unclaimedUsd: v4Detail.feeUsd,
-            estHourlyUsd,
-            estHourlyPercent,
-            pnlUsd,
-            pnlPercent,
-            fee: v4Detail.feePct,
-            liquidity: 'Active',
-            ageStr,
-            tickLower: v4Detail.rangeStr,
-            tickUpper: '',
-            priceMin,
-            priceMax,
-            priceNow,
-            inRange,
-            isV4: true,
-            protocol: 'v4',
-          });
-        } catch {
-          // Skip if burned or non-owned
+          depData = {
+            depAmount0: fetchedDep.depAmount0,
+            depAmount1: fetchedDep.depAmount1,
+            depTotalUsd: fetchedDep.depTotalUsd,
+            mintTsStr: mintTsStr || null
+          };
+          posCache[cacheKey] = depData;
+          cacheUpdated = true;
         }
+
+        const mintTsStr = depData.mintTsStr || nftMintTsMap[tid];
+        let ageHours = 24;
+        if (mintTsStr) {
+          const ageMs = Date.now() - new Date(mintTsStr).getTime();
+          ageHours = Math.max(0.5, ageMs / (1000 * 3600));
+        }
+
+        const depTotalUsd = depData.depTotalUsd || 0;
+        const depAmount0 = depData.depAmount0 || 0;
+        const depAmount1 = depData.depAmount1 || 0;
+
+        const totalPosUsd = v4Detail.valueUsd;
+        const pnlUsd = depTotalUsd > 0 ? totalPosUsd - depTotalUsd : 0;
+        const pnlPercent = depTotalUsd > 0 ? (pnlUsd / depTotalUsd) * 100 : 0;
+
+        const estHourlyUsd = v4Detail.feeUsd > 0 ? v4Detail.feeUsd / ageHours : 0;
+        const baseForYield = depTotalUsd > 0 ? depTotalUsd : (v4Detail.valueUsd > 0 ? v4Detail.valueUsd : 0);
+        const estHourlyPercent = baseForYield > 0 ? (estHourlyUsd / baseForYield) * 100 : 0;
+
+        const ageStr = formatAgeFromTimestamp(mintTsStr);
+
+        const tickCurrent = Number(v4Detail.tickCurrent);
+        const tickLower = Number(v4Detail.tickLower);
+        const tickUpper = Number(v4Detail.tickUpper);
+        const inRange = tickCurrent >= tickLower && tickCurrent <= tickUpper;
+
+        let priceA = 0, priceB = 0, priceNow = 0;
+        const sqrtP = Number(v4Detail.sqrtPriceX96) / Math.pow(2, 96);
+        const rawNow = sqrtP * sqrtP;
+
+        if (v4Detail.isC0Usdg) {
+          priceA = Math.pow(10, v4Detail.dec1 - 6) / Math.pow(1.0001, tickLower);
+          priceB = Math.pow(10, v4Detail.dec1 - 6) / Math.pow(1.0001, tickUpper);
+          priceNow = Math.pow(10, v4Detail.dec1 - 6) / rawNow;
+        } else if (v4Detail.isC1Usdg) {
+          priceA = Math.pow(1.0001, tickLower) * Math.pow(10, v4Detail.dec0 - 6);
+          priceB = Math.pow(1.0001, tickUpper) * Math.pow(10, v4Detail.dec0 - 6);
+          priceNow = rawNow * Math.pow(10, v4Detail.dec0 - 6);
+        } else {
+          priceA = Math.pow(1.0001, tickLower) * Math.pow(10, v4Detail.dec0 - v4Detail.dec1);
+          priceB = Math.pow(1.0001, tickUpper) * Math.pow(10, v4Detail.dec0 - v4Detail.dec1);
+          priceNow = rawNow * Math.pow(10, v4Detail.dec0 - v4Detail.dec1);
+        }
+
+        const priceMin = Math.min(priceA, priceB);
+        const priceMax = Math.max(priceA, priceB);
+
+        return {
+          tokenId: tid,
+          symbol0: v4Detail.sym0,
+          symbol1: v4Detail.sym1,
+          amount0: v4Detail.amount0,
+          amount1: v4Detail.amount1,
+          totalUsd: v4Detail.valueUsd - v4Detail.feeUsd,
+          depAmount0,
+          depAmount1,
+          depTotalUsd,
+          unclaimed0: v4Detail.unclaimed0,
+          unclaimed1: v4Detail.unclaimed1,
+          unclaimedUsd: v4Detail.feeUsd,
+          estHourlyUsd,
+          estHourlyPercent,
+          pnlUsd,
+          pnlPercent,
+          fee: v4Detail.feePct,
+          liquidity: 'Active',
+          ageStr,
+          tickLower: v4Detail.rangeStr,
+          tickUpper: '',
+          priceMin,
+          priceMax,
+          priceNow,
+          inRange,
+          isV4: true,
+          protocol: 'v4',
+        };
+      } catch {
+        return null;
       }
-    }
-  } catch {
-    // Skip V4 error
+    });
+
+    const v4Results = await Promise.all(v4Promises);
+    v4Results.forEach(p => { if (p) positions.push(p); });
   }
 
-  // 3. Check Uniswap V3 Positions (UNI-V3-POS NFTs)
-  try {
-    const url = `https://robinhoodchain.blockscout.com/api/v2/addresses/${wallet.address}/nft?contract_address_hash=${UNISWAP_V3_POSM_ADDRESS}`;
-    const res = await fetch(url);
-    const data = await res.json();
+  // 3. Process Uniswap V3 Positions in parallel
+  if (dataV3.items) {
+    const v3Promises = dataV3.items.map(async (item) => {
+      const tid = (item.id || item.token_id).toString();
+      try {
+        const v3Detail = await getV3PositionDetails(tid, wallet.address);
+        if (!v3Detail) return null;
 
-    if (data.items) {
-      for (const item of data.items) {
-        const tid = (item.id || item.token_id).toString();
-        try {
-          const v3Detail = await getV3PositionDetails(tid, wallet.address);
-          if (!v3Detail) continue;
-
-          const mintTsStr = nftMintTsMap[tid];
-          let ageHours = 24;
-          if (mintTsStr) {
-            const ageMs = Date.now() - new Date(mintTsStr).getTime();
-            ageHours = Math.max(0.5, ageMs / (1000 * 3600));
-          }
-
-          const totalPosUsd = v3Detail.valueUsd;
-          const estHourlyUsd = v3Detail.feeUsd > 0 ? v3Detail.feeUsd / ageHours : 0;
-          const estHourlyPercent = totalPosUsd > 0 ? (estHourlyUsd / totalPosUsd) * 100 : 0;
-          const ageStr = formatAgeFromTimestamp(mintTsStr);
-
-          positions.push({
-            tokenId: tid,
-            symbol0: v3Detail.sym0,
-            symbol1: v3Detail.sym1,
-            amount0: v3Detail.amount0,
-            amount1: v3Detail.amount1,
-            totalUsd: v3Detail.valueUsd,
-            depAmount0: 0, depAmount1: 0, depTotalUsd: 0,
-            unclaimed0: v3Detail.unclaimed0,
-            unclaimed1: v3Detail.unclaimed1,
-            unclaimedUsd: v3Detail.feeUsd,
-            estHourlyUsd,
-            estHourlyPercent,
-            pnlUsd: 0, pnlPercent: 0,
-            fee: v3Detail.feePct,
-            liquidity: 'Active',
-            ageStr,
-            tickLower: v3Detail.tickLower,
-            tickUpper: v3Detail.tickUpper,
-            priceMin: v3Detail.priceMin,
-            priceMax: v3Detail.priceMax,
-            priceNow: v3Detail.priceNow,
-            inRange: v3Detail.inRange,
-            isV3: true,
-            protocol: 'v3',
-          });
-        } catch {
-          // Skip if burned or non-owned
+        const mintTsStr = nftMintTsMap[tid];
+        let ageHours = 24;
+        if (mintTsStr) {
+          const ageMs = Date.now() - new Date(mintTsStr).getTime();
+          ageHours = Math.max(0.5, ageMs / (1000 * 3600));
         }
+
+        const totalPosUsd = v3Detail.valueUsd;
+        const estHourlyUsd = v3Detail.feeUsd > 0 ? v3Detail.feeUsd / ageHours : 0;
+        const estHourlyPercent = totalPosUsd > 0 ? (estHourlyUsd / totalPosUsd) * 100 : 0;
+        const ageStr = formatAgeFromTimestamp(mintTsStr);
+
+        return {
+          tokenId: tid,
+          symbol0: v3Detail.sym0,
+          symbol1: v3Detail.sym1,
+          amount0: v3Detail.amount0,
+          amount1: v3Detail.amount1,
+          totalUsd: v3Detail.valueUsd,
+          depAmount0: 0, depAmount1: 0, depTotalUsd: 0,
+          unclaimed0: v3Detail.unclaimed0,
+          unclaimed1: v3Detail.unclaimed1,
+          unclaimedUsd: v3Detail.feeUsd,
+          estHourlyUsd,
+          estHourlyPercent,
+          pnlUsd: 0, pnlPercent: 0,
+          fee: v3Detail.feePct,
+          liquidity: 'Active',
+          ageStr,
+          tickLower: v3Detail.tickLower,
+          tickUpper: v3Detail.tickUpper,
+          priceMin: v3Detail.priceMin,
+          priceMax: v3Detail.priceMax,
+          priceNow: v3Detail.priceNow,
+          inRange: v3Detail.inRange,
+          isV3: true,
+          protocol: 'v3',
+        };
+      } catch {
+        return null;
       }
-    }
-  } catch {
-    // Skip V3 error
+    });
+
+    const v3Results = await Promise.all(v3Promises);
+    v3Results.forEach(p => { if (p) positions.push(p); });
+  }
+
+  // Save updated disk cache if new static data was fetched
+  if (cacheUpdated) {
+    config.savePositionsCache(posCache);
   }
 
   return positions;
 }
+
 
 async function executeCopyAddLiquidity(tx, amountUsd = 50) {
   const wallet = getWallet();
