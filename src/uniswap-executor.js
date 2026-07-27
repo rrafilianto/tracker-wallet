@@ -791,6 +791,10 @@ async function closePositionAndSwapToUsdg(tokenId) {
   await ensurePermit2Allowance(wallet, nonUsdgAddr, balance, UNIVERSAL_ROUTER_ADDRESS);
 
   // Build V4 exact-in single-hop swap
+  // NOTE: SETTLE_ALL maxAmount harus ethers.MaxUint256 (bukan balance) agar tidak revert
+  // bila ada sedikit discrepancy (fee-on-transfer token, rounding, dll).
+  // amountIn di SWAP_EXACT_IN_SINGLE sudah menentukan jumlah exact — SETTLE_ALL hanya
+  // batas atas safety, bukan jumlah yang benar-benar ditarik.
   const swapPlanner = new v4sdk.V4Planner();
   swapPlanner.addAction(v4sdk.Actions.SWAP_EXACT_IN_SINGLE, [{
     poolKey: { currency0: pk.currency0, currency1: pk.currency1, fee: pk.fee, tickSpacing: pk.tickSpacing, hooks: pk.hooks },
@@ -799,7 +803,7 @@ async function closePositionAndSwapToUsdg(tokenId) {
     amountOutMinimum: 0n,
     hookData: '0x',
   }]);
-  swapPlanner.addAction(v4sdk.Actions.SETTLE_ALL, [nonUsdgAddr, balance]);
+  swapPlanner.addAction(v4sdk.Actions.SETTLE_ALL, [nonUsdgAddr, ethers.MaxUint256]);
   swapPlanner.addAction(v4sdk.Actions.TAKE_ALL, [USDG_ADDRESS, 0n]);
 
   const router = new ethers.Contract(UNIVERSAL_ROUTER_ADDRESS, UNIVERSAL_ROUTER_ABI, wallet);
@@ -821,7 +825,9 @@ async function ensurePermit2Allowance(wallet, tokenAddr, amountMax, spender = UN
   }
   const [p2Amount] = await permit2.allowance(wallet.address, tokenAddr, spender).catch(() => [0n]);
   if (p2Amount < BigInt(amountMax)) {
-    const tx = await permit2.approve(tokenAddr, spender, BigInt(amountMax) * 2n, 2n ** 48n - 1n);
+    // Gunakan MAX_UINT160 agar tidak overflow saat approve Permit2 (uint160 max = 2^160-1)
+    const MAX_UINT160 = (2n ** 160n) - 1n;
+    const tx = await permit2.approve(tokenAddr, spender, MAX_UINT160, 2n ** 48n - 1n);
     await tx.wait();
   }
 }
