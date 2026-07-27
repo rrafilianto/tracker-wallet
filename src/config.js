@@ -23,6 +23,9 @@ function saveWallets(wallets) {
 const DEFAULT_SETTINGS = {
   amount_usd: parseFloat(process.env.DEFAULT_COPY_AMOUNT_USD) || 50,
   range_pct: 20, // % below current price for one-side lower LP
+  tp_pct: 30, // % price increase to trigger Take Profit
+  sl_pct: 15, // % price drop to trigger Stop Loss
+  auto_close_enabled: true, // Auto close LP position when TP/SL is hit
 };
 
 function loadSettings() {

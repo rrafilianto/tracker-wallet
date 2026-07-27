@@ -3,6 +3,7 @@ const gmgn = require('./gmgn-api');
 const tg = require('./telegram');
 const rpcDecoder = require('./rpc-decoder');
 const uniswapExecutor = require('./uniswap-executor');
+const gmgnWs = require('./gmgn-websocket');
 
 if (!config.GMGN_API_KEY || config.GMGN_API_KEY === 'gmgn_xxx') {
   console.error('ERROR: GMGN_API_KEY not set in .env');
@@ -15,7 +16,7 @@ if (!config.TELEGRAM_BOT_TOKEN || !config.TELEGRAM_CHAT_ID) {
 
 let wallets = config.loadWallets();
 let lastTxMap = {};
-let deploySettings = config.loadSettings(); // { amount_usd, range_pct }
+let deploySettings = config.loadSettings(); // { amount_usd, range_pct, tp_pct, sl_pct, auto_close_enabled }
 const pendingCopyTrades = new Map(); // shortKey -> fullTxHash
 const pendingPoolSelections = new Map(); // shortKey -> { tokenAddr, pools }
 const ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
@@ -23,14 +24,25 @@ const ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 // ── Settings helpers ────────────────────────────────────────────────────────
 const AMOUNT_PRESETS = [10, 25, 50, 100, 200, 500];
 const PCT_PRESETS    = [5, 10, 20, 30, 50, 75]; // % below current price
+const TP_PRESETS     = [10, 20, 30, 50, 100];   // % price increase for TP
+const SL_PRESETS     = [5, 10, 15, 20, 30];     // % price drop for SL
 
 function buildSettingsText(s) {
+  const autoCloseStr = s.auto_close_enabled
+    ? '🤖 <b>Auto-Close: ON</b> (Otomatis Liquidated ke USDG)'
+    : '🔔 <b>Auto-Close: OFF</b> (Notifikasi Alert Saja)';
+
   return (
-    `⚙️ <b>LP Deploy Settings</b>\n\n` +
+    `⚙️ <b>LP Deploy & TP/SL Settings</b>\n\n` +
     `💰 Amount: <b>$${s.amount_usd} USDG</b>\n` +
-    `📉 Range: <b>-${s.range_pct}% di bawah harga saat ini</b>\n\n` +
+    `📉 Range: <b>-${s.range_pct}% di bawah harga saat ini</b>\n` +
+    `🎯 Take Profit: <b>+${s.tp_pct || 30}%</b>\n` +
+    `🚨 Stop Loss: <b>-${s.sl_pct || 15}%</b>\n` +
+    `${autoCloseStr}\n\n` +
     `<b>💰 Ubah Amount (USDG):</b>\n` +
-    `<b>📉 Ubah Range (% bawah harga):</b>`
+    `<b>📉 Ubah Range (% bawah harga):</b>\n` +
+    `<b>🎯 Ubah Take Profit (+%):</b>\n` +
+    `<b>🚨 Ubah Stop Loss (-%):</b>`
   );
 }
 
@@ -51,7 +63,20 @@ function buildSettingsMarkup(s) {
     text: s.range_pct === v ? `✅ -${v}%` : `-${v}%`,
     callback_data: `settings_pct_${v}`,
   }));
-  return { inline_keyboard: [amtRow1, amtRow2, pctRow1, pctRow2] };
+  const tpRow = TP_PRESETS.map(v => ({
+    text: (s.tp_pct || 30) === v ? `✅ +${v}%` : `+${v}%`,
+    callback_data: `settings_tp_${v}`,
+  }));
+  const slRow = SL_PRESETS.map(v => ({
+    text: (s.sl_pct || 15) === v ? `✅ -${v}%` : `-${v}%`,
+    callback_data: `settings_sl_${v}`,
+  }));
+  const toggleRow = [{
+    text: s.auto_close_enabled ? '🤖 Auto-Close: ON (Klik untuk OFF)' : '🔔 Auto-Close: OFF (Klik untuk ON)',
+    callback_data: 'settings_autoclose_toggle',
+  }];
+
+  return { inline_keyboard: [amtRow1, amtRow2, pctRow1, pctRow2, tpRow, slRow, toggleRow] };
 }
 
 const bot = tg.init(config.TELEGRAM_BOT_TOKEN, config.TELEGRAM_CHAT_ID);
@@ -189,6 +214,7 @@ async function handleCommand(msg) {
         const posData = await uniswapExecutor.getExecutorPositions();
         const formatted = tg.formatExecutorPositions(posData, tg.formatWibTimeShort());
         await send(cid, formatted.text, formatted.reply_markup ? { reply_markup: formatted.reply_markup } : {});
+        syncActivePositionsToWs();
       } catch (err) {
         await send(cid, `Error loading executor positions: ${err.message}`);
       }
@@ -760,6 +786,7 @@ bot.on('callback_query', async (query) => {
       successMsg += `📌 <b>Deploy Tx:</b> https://robinhoodchain.blockscout.com/tx/${result.hash}`;
 
       await send(cid, successMsg);
+      syncActivePositionsToWs();
     } catch (e) {
       await send(cid, `❌ Deploy gagal: ${e.message}`);
     }
@@ -793,10 +820,113 @@ bot.on('callback_query', async (query) => {
       parse_mode: 'HTML',
       reply_markup: buildSettingsMarkup(deploySettings),
     });
+  } else if (data.startsWith('settings_tp_')) {
+    const val = parseInt(data.replace('settings_tp_', ''), 10);
+    if (!TP_PRESETS.includes(val)) {
+      await bot.answerCallbackQuery(query.id, { text: 'Invalid value' });
+      return;
+    }
+    deploySettings.tp_pct = val;
+    config.saveSettings(deploySettings);
+    await bot.answerCallbackQuery(query.id, { text: `✅ TP diubah ke +${val}%` });
+    await bot.editMessageText(buildSettingsText(deploySettings), {
+      chat_id: cid,
+      message_id: query.message.message_id,
+      parse_mode: 'HTML',
+      reply_markup: buildSettingsMarkup(deploySettings),
+    });
+  } else if (data.startsWith('settings_sl_')) {
+    const val = parseInt(data.replace('settings_sl_', ''), 10);
+    if (!SL_PRESETS.includes(val)) {
+      await bot.answerCallbackQuery(query.id, { text: 'Invalid value' });
+      return;
+    }
+    deploySettings.sl_pct = val;
+    config.saveSettings(deploySettings);
+    await bot.answerCallbackQuery(query.id, { text: `✅ SL diubah ke -${val}%` });
+    await bot.editMessageText(buildSettingsText(deploySettings), {
+      chat_id: cid,
+      message_id: query.message.message_id,
+      parse_mode: 'HTML',
+      reply_markup: buildSettingsMarkup(deploySettings),
+    });
+  } else if (data === 'settings_autoclose_toggle') {
+    deploySettings.auto_close_enabled = !deploySettings.auto_close_enabled;
+    config.saveSettings(deploySettings);
+    const statusText = deploySettings.auto_close_enabled ? 'Auto-Close ON 🤖' : 'Auto-Close OFF 🔔';
+    await bot.answerCallbackQuery(query.id, { text: `✅ ${statusText}` });
+    await bot.editMessageText(buildSettingsText(deploySettings), {
+      chat_id: cid,
+      message_id: query.message.message_id,
+      parse_mode: 'HTML',
+      reply_markup: buildSettingsMarkup(deploySettings),
+    });
   }
 });
 
-tg.sendMessage(`🤖 <b>Wallet Tracker Started</b>\nMode: <b>GMGN</b>\nMonitoring wallet activity…`)
+async function handleTpSlTrigger({ type, position, currentPrice, deltaPct, entryPrice }) {
+  const cid = config.TELEGRAM_CHAT_ID;
+  const autoClosed = deploySettings.auto_close_enabled;
+  const alertText = tg.formatTpSlAlert({
+    type,
+    position,
+    currentPrice,
+    deltaPct,
+    entryPrice,
+    autoClosed,
+  });
+
+  await send(cid, alertText);
+
+  if (autoClosed) {
+    try {
+      const proto = position.protocol || 'v4';
+      const posId = position.positionId || position.tokenId;
+      console.log(`🤖 [AUTO-CLOSE] Closing ${proto.toUpperCase()} Position #${posId}...`);
+
+      if (proto === 'v3') {
+        await uniswapExecutor.closeV3PositionAndSwapToUsdg(posId);
+      } else {
+        await uniswapExecutor.closePositionAndSwapToUsdg(posId);
+      }
+
+      await send(cid, `🤖 <b>[AUTO-CLOSE SUCCESS]</b> Position #${posId} has been closed & liquidated to USDG.`);
+      gmgnWs.unsubscribePosition(position.tokenAddress, posId);
+    } catch (err) {
+      console.error(`❌ [AUTO-CLOSE ERROR] Failed to close Position #${position.positionId}:`, err.message);
+      await send(cid, `❌ <b>[AUTO-CLOSE FAILED]</b> Position #${position.positionId}: ${err.message}`);
+    }
+  }
+}
+
+async function syncActivePositionsToWs() {
+  try {
+    const posData = await uniswapExecutor.getExecutorPositions();
+    if (posData && posData.length > 0) {
+      posData.forEach((pos) => {
+        if (pos.tokenAddress) {
+          gmgnWs.subscribePosition(pos.tokenAddress, {
+            positionId: pos.tokenId,
+            tokenAddress: pos.tokenAddress,
+            tokenSymbol: pos.tokenSymbol || 'Token',
+            entryPriceUsd: pos.entryPriceUsd || pos.priceNow,
+            tpPct: deploySettings.tp_pct || 30,
+            slPct: deploySettings.sl_pct || 15,
+            protocol: pos.protocol || 'v4',
+          });
+        }
+      });
+    }
+  } catch (err) {
+    console.error('[WS SYNC] Error syncing active positions:', err.message);
+  }
+}
+
+// Initialize GMGN WebSocket Price Listener
+gmgnWs.init(config.GMGN_API_KEY, handleTpSlTrigger);
+syncActivePositionsToWs();
+
+tg.sendMessage(`🤖 <b>Wallet Tracker Started</b>\nMode: <b>GMGN + WS TP/SL</b>\nMonitoring wallet activity & live LP positions…`)
   .then(() => startPolling())
   .catch((err) => {
     console.error('Fatal:', err);

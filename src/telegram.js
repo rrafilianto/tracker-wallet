@@ -420,7 +420,8 @@ function formatExecutorPositions(positions, updatedAt = null) {
         estHourlyLine +
         pnlLine +
         `\n   Age: <b>${ageStr}</b>` +
-        `\n   Price Range: <b>${rangeStr}</b>`,
+        `\n   Price Range: <b>${rangeStr}</b>` +
+        (pos.tpPct || pos.slPct ? `\n   🎯 TP: <b>+${pos.tpPct || 30}%</b> | 🚨 SL: <b>-${pos.slPct || 15}%</b>` : ''),
     );
 
     const protoKey = pos.isV3 || pos.protocol === 'v3' ? 'v3' : 'v4';
@@ -459,6 +460,29 @@ function formatExecutorPositions(positions, updatedAt = null) {
   };
 }
 
+function formatTpSlAlert(data) {
+  const { type, position, currentPrice, deltaPct, autoClosed, entryPrice } = data;
+  const isTp = type === 'TP';
+  const emoji = isTp ? '🎯 🟢' : '🚨 🔴';
+  const title = isTp ? 'TAKE PROFIT TRIGGERED' : 'STOP LOSS TRIGGERED';
+  const sign = deltaPct >= 0 ? '+' : '';
+
+  const lines = [
+    `${emoji} <b>[${title}]</b>`,
+    `Position: <b>#${position.positionId || position.tokenId || 'LP'}</b>`,
+    `Token: <b>${position.tokenSymbol || 'Token'}</b> (<code>${shortAddr(position.tokenAddress || '')}</code>)`,
+    `Entry Price: <b>$${entryPrice ? entryPrice.toFixed(6) : '-'} USD</b>`,
+    `Current Price: <b>$${currentPrice ? currentPrice.toFixed(6) : '-'} USD</b>`,
+    `Price Delta: <b>${sign}${deltaPct.toFixed(2)}%</b>`,
+    '',
+    autoClosed
+      ? '🤖 <b>Status: AUTO-CLOSED & LIQUIDATED TO USDG</b> ✅'
+      : '🔔 <b>Status: ALERT ONLY (Auto-Close OFF)</b>',
+  ];
+
+  return lines.join('\n');
+}
+
 function buildTxButtons(activity, wallet) {
   if (wallet.chain !== 'robinhood' || !activity?.length) return undefined;
 
@@ -487,6 +511,7 @@ module.exports = {
   formatHoldings,
   formatExecutorBalance,
   formatExecutorPositions,
+  formatTpSlAlert,
   buildTxButtons,
   shortAddr,
   displayName,

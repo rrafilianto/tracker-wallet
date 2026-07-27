@@ -531,7 +531,7 @@ async function getExecutorPositions() {
             depAmount0: fetchedDep.depAmount0,
             depAmount1: fetchedDep.depAmount1,
             depTotalUsd: fetchedDep.depTotalUsd,
-            mintTsStr: mintTsStr || null
+            mintTsStr: mintTsStr || null,
           };
           posCache[cacheKey] = depData;
           cacheUpdated = true;
@@ -581,11 +581,21 @@ async function getExecutorPositions() {
           priceNow = rawNow * Math.pow(10, v4Detail.dec0 - v4Detail.dec1);
         }
 
+        if (!depData.entryPriceUsd && priceNow > 0) {
+          depData.entryPriceUsd = priceNow;
+          posCache[cacheKey] = depData;
+          cacheUpdated = true;
+        }
+
         const priceMin = Math.min(priceA, priceB);
         const priceMax = Math.max(priceA, priceB);
+        const tokenAddress = v4Detail.isC0Usdg ? v4Detail.currency1 : (v4Detail.isC1Usdg ? v4Detail.currency0 : v4Detail.currency1);
+        const tokenSymbol = v4Detail.isC0Usdg ? v4Detail.sym1 : (v4Detail.isC1Usdg ? v4Detail.sym0 : v4Detail.sym1);
 
         return {
           tokenId: tid,
+          tokenAddress,
+          tokenSymbol,
           symbol0: v4Detail.sym0,
           symbol1: v4Detail.sym1,
           amount0: v4Detail.amount0,
@@ -594,6 +604,7 @@ async function getExecutorPositions() {
           depAmount0,
           depAmount1,
           depTotalUsd,
+          entryPriceUsd: depData.entryPriceUsd || priceNow,
           unclaimed0: v4Detail.unclaimed0,
           unclaimed1: v4Detail.unclaimed1,
           unclaimedUsd: v4Detail.feeUsd,
@@ -642,14 +653,20 @@ async function getExecutorPositions() {
         const estHourlyPercent = totalPosUsd > 0 ? (estHourlyUsd / totalPosUsd) * 100 : 0;
         const ageStr = formatAgeFromTimestamp(mintTsStr);
 
+        const tokenAddress = v3Detail.isC0Usdg ? v3Detail.token1 : (v3Detail.isC1Usdg ? v3Detail.token0 : v3Detail.token1);
+        const tokenSymbol = v3Detail.isC0Usdg ? v3Detail.sym1 : (v3Detail.isC1Usdg ? v3Detail.sym0 : v3Detail.sym1);
+
         return {
           tokenId: tid,
+          tokenAddress,
+          tokenSymbol,
           symbol0: v3Detail.sym0,
           symbol1: v3Detail.sym1,
           amount0: v3Detail.amount0,
           amount1: v3Detail.amount1,
           totalUsd: v3Detail.valueUsd,
           depAmount0: 0, depAmount1: 0, depTotalUsd: 0,
+          entryPriceUsd: v3Detail.priceNow || 0,
           unclaimed0: v3Detail.unclaimed0,
           unclaimed1: v3Detail.unclaimed1,
           unclaimedUsd: v3Detail.feeUsd,
