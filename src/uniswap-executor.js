@@ -71,6 +71,46 @@ const PERMIT2_ABI = [
 ];
 const V4_SWAP_COMMAND = '0x10';
 
+// Robinhood Chain Universal Router menggunakan SWAP_EXACT_IN (path-based, 0x07)
+// bukan SWAP_EXACT_IN_SINGLE (0x06). Dikonfirmasi dari decode on-chain tx sukses.
+// Action codes: SWAP_EXACT_IN=0x07, SETTLE=0x0b, TAKE=0x0e
+//
+// Router ini menggunakan Universal Router V2.1.1 struct:
+// SWAP_EXACT_IN: (currencyIn, PathKey[] path, uint256[] minHopPriceX36, uint128 amountIn, uint128 amountOutMinimum)
+// SETTLE: (address currency, uint256 amount=0, bool payerIsUser=true)
+// TAKE: (address currency, address recipient, uint256 amount=0 means all)
+//
+// Helper: build V4 swap input (bytes) untuk router.execute(V4_SWAP_COMMAND, [input], deadline)
+function buildV4SwapCalldata(tokenIn, tokenOut, fee, tickSpacing, hooks, amountIn, recipient) {
+  const coder = ethers.AbiCoder.defaultAbiCoder();
+  const HOOKS = hooks || HOOKS_ZERO;
+
+  // SWAP_EXACT_IN params (V2.1.1 struct, dengan minHopPriceX36):
+  // (address currencyIn, PathKey[] path, uint256[] minHopPriceX36, uint128 amountIn, uint128 amountOutMinimum)
+  const pathKeyType = '(address intermediateCurrency,uint24 fee,int24 tickSpacing,address hooks,bytes hookData)';
+  const swapParam = coder.encode(
+    ['(address currencyIn,' + pathKeyType + '[] path,uint256[] minHopPriceX36,uint128 amountIn,uint128 amountOutMinimum)'],
+    [{
+      currencyIn: tokenIn,
+      path: [{ intermediateCurrency: tokenOut, fee, tickSpacing, hooks: HOOKS, hookData: '0x' }],
+      minHopPriceX36: [0n], // 0 = no minimum hop price constraint
+      amountIn,
+      amountOutMinimum: 0n,
+    }]
+  );
+
+  // SETTLE params: (address currency, uint256 amount=0 berarti settle semua, bool payerIsUser=true)
+  // amount=0 adalah pattern yang benar (dikonfirmasi dari on-chain tx)
+  const settleParam = coder.encode(['address', 'uint256', 'bool'], [tokenIn, 0n, true]);
+
+  // TAKE params: (address currency, address recipient, uint256 amount=0 means all)
+  const takeParam = coder.encode(['address', 'address', 'uint256'], [tokenOut, recipient, 0n]);
+
+  // V4 actions: SWAP_EXACT_IN(0x07) + SETTLE(0x0b) + TAKE(0x0e)
+  const actions = '0x070b0e';
+  return coder.encode(['bytes', 'bytes[]'], [actions, [swapParam, settleParam, takeParam]]);
+}
+
 // Uniswap V3 ABIs
 const UNISWAP_V3_FACTORY_ABI = [
   'function getPool(address tokenA, address tokenB, uint24 fee) view returns (address pool)',
@@ -790,24 +830,21 @@ async function closePositionAndSwapToUsdg(tokenId) {
   // Approve Universal Router to spend non-USDG token via Permit2
   await ensurePermit2Allowance(wallet, nonUsdgAddr, balance, UNIVERSAL_ROUTER_ADDRESS);
 
-  // Build V4 exact-in single-hop swap
-  // NOTE: SETTLE_ALL maxAmount harus ethers.MaxUint256 (bukan balance) agar tidak revert
-  // bila ada sedikit discrepancy (fee-on-transfer token, rounding, dll).
-  // amountIn di SWAP_EXACT_IN_SINGLE sudah menentukan jumlah exact — SETTLE_ALL hanya
-  // batas atas safety, bukan jumlah yang benar-benar ditarik.
-  const swapPlanner = new v4sdk.V4Planner();
-  swapPlanner.addAction(v4sdk.Actions.SWAP_EXACT_IN_SINGLE, [{
-    poolKey: { currency0: pk.currency0, currency1: pk.currency1, fee: pk.fee, tickSpacing: pk.tickSpacing, hooks: pk.hooks },
-    zeroForOne,
-    amountIn: balance,
-    amountOutMinimum: 0n,
-    hookData: '0x',
-  }]);
-  swapPlanner.addAction(v4sdk.Actions.SETTLE_ALL, [nonUsdgAddr, ethers.MaxUint256]);
-  swapPlanner.addAction(v4sdk.Actions.TAKE_ALL, [USDG_ADDRESS, 0n]);
+  // Build V4 swap: token → USDG
+  // Menggunakan SWAP_EXACT_IN (0x07, path-based) + SETTLE (0x0b) + TAKE (0x0e)
+  // sesuai pattern Universal Router di Robinhood Chain (dikonfirmasi dari on-chain tx)
+  const v4SwapInput = buildV4SwapCalldata(
+    nonUsdgAddr,     // tokenIn  = non-USDG token
+    USDG_ADDRESS,    // tokenOut = USDG
+    Number(pk.fee),
+    Number(pk.tickSpacing),
+    pk.hooks,
+    balance,         // amountIn = full balance token
+    wallet.address   // recipient
+  );
 
   const router = new ethers.Contract(UNIVERSAL_ROUTER_ADDRESS, UNIVERSAL_ROUTER_ABI, wallet);
-  const swapTx = await router.execute(V4_SWAP_COMMAND, [swapPlanner.finalize()], deadline);
+  const swapTx = await router.execute(V4_SWAP_COMMAND, [v4SwapInput], deadline);
   const swapReceipt = await swapTx.wait();
   return {
     closeTxHash: burnTx.hash,
@@ -1417,19 +1454,19 @@ async function swapUsdgToWeth(wallet, wethAmountRaw) {
   if (!bestPoolKey) throw new Error('No USDG/WETH V4 pool found for swap');
 
   // Swap exact-out WETH (receive wethAmountRaw WETH, pay up to all USDG balance)
-  const swapPlanner = new v4sdk.V4Planner();
-  swapPlanner.addAction(v4sdk.Actions.SWAP_EXACT_IN_SINGLE, [{
-    poolKey: bestPoolKey,
-    zeroForOne,
-    amountIn: usdgBalance,
-    amountOutMinimum: wethAmountRaw,
-    hookData: '0x',
-  }]);
-  swapPlanner.addAction(v4sdk.Actions.SETTLE_ALL, [USDG_ADDRESS, usdgBalance]);
-  swapPlanner.addAction(v4sdk.Actions.TAKE_ALL, [WETH_ADDRESS, wethAmountRaw]);
+  // USDG → WETH menggunakan SWAP_EXACT_IN path-based (pattern yg benar di chain ini)
+  const v4SwapInput = buildV4SwapCalldata(
+    USDG_ADDRESS,   // tokenIn  = USDG
+    WETH_ADDRESS,   // tokenOut = WETH
+    bestPoolKey.fee,
+    bestPoolKey.tickSpacing,
+    bestPoolKey.hooks,
+    usdgBalance,    // amountIn
+    wallet.address  // recipient
+  );
 
   const router = new ethers.Contract(UNIVERSAL_ROUTER_ADDRESS, UNIVERSAL_ROUTER_ABI, wallet);
-  const tx     = await router.execute(V4_SWAP_COMMAND, [swapPlanner.finalize()], deadline);
+  const tx     = await router.execute(V4_SWAP_COMMAND, [v4SwapInput], deadline);
   const receipt = await tx.wait();
   return receipt.hash;
 }
@@ -1668,16 +1705,19 @@ async function swapTokenToUsdgV4(wallet, tokenAddr, balance) {
   // Approve Universal Router to spend non-USDG token via Permit2
   await ensurePermit2Allowance(wallet, tAddrChk, balance, UNIVERSAL_ROUTER_ADDRESS);
 
-  const swapPlanner = new v4sdk.V4Planner();
-  swapPlanner.addAction(v4sdk.Actions.SWAP_EXACT_IN_SINGLE, [{
-    poolKey: bestPoolKey, zeroForOne,
-    amountIn: balance, amountOutMinimum: 0n, hookData: '0x',
-  }]);
-  swapPlanner.addAction(v4sdk.Actions.SETTLE_ALL, [tAddrChk, balance]);
-  swapPlanner.addAction(v4sdk.Actions.TAKE_ALL, [USDG_ADDRESS, 0n]);
+  // token → USDG menggunakan SWAP_EXACT_IN path-based
+  const v4SwapInput = buildV4SwapCalldata(
+    tAddrChk,       // tokenIn  = non-USDG token
+    safeAddr(USDG_ADDRESS), // tokenOut = USDG
+    bestPoolKey.fee,
+    bestPoolKey.tickSpacing,
+    bestPoolKey.hooks,
+    balance,        // amountIn = full balance
+    wallet.address  // recipient
+  );
 
   const router  = new ethers.Contract(UNIVERSAL_ROUTER_ADDRESS, UNIVERSAL_ROUTER_ABI, wallet);
-  const tx      = await router.execute(V4_SWAP_COMMAND, [swapPlanner.finalize()], deadline);
+  const tx      = await router.execute(V4_SWAP_COMMAND, [v4SwapInput], deadline);
   const receipt = await tx.wait();
   return receipt.hash;
 }
