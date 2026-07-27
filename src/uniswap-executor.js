@@ -712,21 +712,8 @@ async function executeCopyAddLiquidity(tx, amountUsd = 50) {
   const amount1Max = (BigInt(mint1.toString()) * 101n / 100n).toString();
 
   // Step 6: Permit2 approvals
-  const permit2 = new ethers.Contract(PERMIT2_ADDRESS, PERMIT2_ABI, wallet);
-  async function ensurePermit2(tokenAddr, amountMax) {
-    if (tokenAddr.toLowerCase() === ethers.ZeroAddress.toLowerCase()) return;
-    const erc20 = new ethers.Contract(tokenAddr, ERC20_ABI, wallet);
-    const erc20Allow = await erc20.allowance(wallet.address, PERMIT2_ADDRESS).catch(() => 0n);
-    if (erc20Allow < BigInt(amountMax)) {
-      await (await erc20.approve(PERMIT2_ADDRESS, ethers.MaxUint256)).wait();
-    }
-    const [p2Amount] = await permit2.allowance(wallet.address, tokenAddr, UNISWAP_V4_POSM_ADDRESS).catch(() => [0n]);
-    if (p2Amount < BigInt(amountMax)) {
-      await permit2.approve(tokenAddr, UNISWAP_V4_POSM_ADDRESS, BigInt(amountMax) * 2n, 2n ** 48n - 1n);
-    }
-  }
-  await ensurePermit2(pk.currency0, amount0Max);
-  await ensurePermit2(pk.currency1, amount1Max);
+  await ensurePermit2Allowance(wallet, pk.currency0, amount0Max, UNISWAP_V4_POSM_ADDRESS);
+  await ensurePermit2Allowance(wallet, pk.currency1, amount1Max, UNISWAP_V4_POSM_ADDRESS);
 
   // Step 7: Mint position
   const planner = new v4sdk.V4PositionPlanner();
@@ -800,12 +787,8 @@ async function closePositionAndSwapToUsdg(tokenId) {
     return { closeTxHash: burnTx.hash, swapTxHash: null };
   }
 
-  // Approve Universal Router to spend non-USDG token
-  const allowance = await tokenContract.allowance(wallet.address, UNIVERSAL_ROUTER_ADDRESS).catch(() => 0n);
-  if (allowance < balance) {
-    const approveTx = await tokenContract.approve(UNIVERSAL_ROUTER_ADDRESS, ethers.MaxUint256);
-    await approveTx.wait();
-  }
+  // Approve Universal Router to spend non-USDG token via Permit2
+  await ensurePermit2Allowance(wallet, nonUsdgAddr, balance, UNIVERSAL_ROUTER_ADDRESS);
 
   // Build V4 exact-in single-hop swap
   const swapPlanner = new v4sdk.V4Planner();
@@ -828,7 +811,7 @@ async function closePositionAndSwapToUsdg(tokenId) {
   };
 }
 
-async function ensurePermit2Allowance(wallet, tokenAddr, amountMax) {
+async function ensurePermit2Allowance(wallet, tokenAddr, amountMax, spender = UNISWAP_V4_POSM_ADDRESS) {
   if (tokenAddr.toLowerCase() === ethers.ZeroAddress.toLowerCase()) return;
   const permit2 = new ethers.Contract(PERMIT2_ADDRESS, PERMIT2_ABI, wallet);
   const erc20 = new ethers.Contract(tokenAddr, ERC20_ABI, wallet);
@@ -836,9 +819,10 @@ async function ensurePermit2Allowance(wallet, tokenAddr, amountMax) {
   if (erc20Allow < BigInt(amountMax)) {
     await (await erc20.approve(PERMIT2_ADDRESS, ethers.MaxUint256)).wait();
   }
-  const [p2Amount] = await permit2.allowance(wallet.address, tokenAddr, UNISWAP_V4_POSM_ADDRESS).catch(() => [0n]);
+  const [p2Amount] = await permit2.allowance(wallet.address, tokenAddr, spender).catch(() => [0n]);
   if (p2Amount < BigInt(amountMax)) {
-    await permit2.approve(tokenAddr, UNISWAP_V4_POSM_ADDRESS, BigInt(amountMax) * 2n, 2n ** 48n - 1n);
+    const tx = await permit2.approve(tokenAddr, spender, BigInt(amountMax) * 2n, 2n ** 48n - 1n);
+    await tx.wait();
   }
 }
 
@@ -1395,12 +1379,11 @@ async function swapUsdgToWeth(wallet, wethAmountRaw) {
   const CHAIN_ID   = 4663;
   const deadline   = Math.floor(Date.now() / 1000) + 600;
 
-  // Approve USDG to Universal Router
+  // Approve USDG to Universal Router via Permit2
   const usdgContract = new ethers.Contract(USDG_ADDRESS, ERC20_ABI, wallet);
   const usdgBalance  = await usdgContract.balanceOf(wallet.address);
-  const allowance    = await usdgContract.allowance(wallet.address, UNIVERSAL_ROUTER_ADDRESS).catch(() => 0n);
-  if (allowance < usdgBalance) {
-    await (await usdgContract.approve(UNIVERSAL_ROUTER_ADDRESS, ethers.MaxUint256)).wait();
+  if (usdgBalance > 0n) {
+    await ensurePermit2Allowance(wallet, USDG_ADDRESS, usdgBalance, UNIVERSAL_ROUTER_ADDRESS);
   }
 
   // Determine pool ordering for USDG/WETH V4 pool (need to find it first)
@@ -1585,56 +1568,63 @@ async function getV3PositionDetails(tokenId, walletAddress) {
   };
 }
 
-// Close a V3 position and swap non-USDG/non-WETH tokens back
+// Close a V3 position and swap non-USDG tokens back to USDG
 async function closeV3PositionAndSwapToUsdg(tokenId) {
   const wallet   = getWallet();
   const provider = wallet.provider;
   const posm     = new ethers.Contract(UNISWAP_V3_POSM_ADDRESS, UNISWAP_V3_POSM_ABI, wallet);
   const deadline = Math.floor(Date.now() / 1000) + 600;
 
-  const pos = await posm.positions(tokenId);
-  const { token0, token1, fee, tickLower, tickUpper, liquidity } = pos;
+  let closeTxHash = 'N/A';
+  let token0, token1;
 
-  // 1. Decrease liquidity to 0
-  if (liquidity > 0n) {
-    await (await posm.decreaseLiquidity({
-      tokenId, liquidity,
-      amount0Min: 0n, amount1Min: 0n,
-      deadline,
-    })).wait();
+  try {
+    const pos = await posm.positions(tokenId);
+    token0 = pos.token0;
+    token1 = pos.token1;
+    const { liquidity } = pos;
+
+    // 1. Decrease liquidity to 0
+    if (liquidity > 0n) {
+      await (await posm.decreaseLiquidity({
+        tokenId, liquidity,
+        amount0Min: 0n, amount1Min: 0n,
+        deadline,
+      })).wait();
+    }
+
+    // 2. Collect all tokens (including fees)
+    const collectTx = await posm.collect({
+      tokenId,
+      recipient: wallet.address,
+      amount0Max: BigInt('0xffffffffffffffffffffffffffffffff'),
+      amount1Max: BigInt('0xffffffffffffffffffffffffffffffff'),
+    });
+    await collectTx.wait();
+    closeTxHash = collectTx.hash;
+
+    // 3. Burn the NFT
+    try {
+      await (await posm.burn(tokenId)).wait();
+    } catch (burnErr) {
+      console.warn(`[V3 CLOSE] Warning: posm.burn(#${tokenId}) failed or already burned:`, burnErr.message);
+    }
+  } catch (posErr) {
+    console.warn(`[V3 CLOSE] Could not query/burn position #${tokenId} (may already be closed/burned):`, posErr.message);
   }
-
-  // 2. Collect all tokens (including fees)
-  const collectTx = await posm.collect({
-    tokenId,
-    recipient: wallet.address,
-    amount0Max: BigInt('0xffffffffffffffffffffffffffffffff'),
-    amount1Max: BigInt('0xffffffffffffffffffffffffffffffff'),
-  });
-  await collectTx.wait();
-
-  // 3. Burn the NFT
-  await (await posm.burn(tokenId)).wait();
-
-  const closeTxHash = collectTx.hash;
-
-  // 4. Swap non-USDG token to USDG if needed
-  const isC0Usdg = token0.toLowerCase() === USDG_ADDRESS.toLowerCase();
-  const isC1Usdg = token1.toLowerCase() === USDG_ADDRESS.toLowerCase();
 
   let swapTxHash = null;
 
-  // Swap token0 → USDG if token0 is not USDG
-  if (!isC0Usdg) {
+  // 4. Swap non-USDG token to USDG if needed
+  if (token0 && token0.toLowerCase() !== USDG_ADDRESS.toLowerCase()) {
     const t0 = new ethers.Contract(token0, ERC20_ABI, wallet);
-    const bal0 = await t0.balanceOf(wallet.address);
+    const bal0 = await t0.balanceOf(wallet.address).catch(() => 0n);
     if (bal0 > 0n) swapTxHash = await swapTokenToUsdgV4(wallet, token0, bal0);
   }
 
-  // Swap token1 → USDG if token1 is not USDG
-  if (!isC1Usdg) {
+  if (token1 && token1.toLowerCase() !== USDG_ADDRESS.toLowerCase()) {
     const t1 = new ethers.Contract(token1, ERC20_ABI, wallet);
-    const bal1 = await t1.balanceOf(wallet.address);
+    const bal1 = await t1.balanceOf(wallet.address).catch(() => 0n);
     if (bal1 > 0n) swapTxHash = await swapTokenToUsdgV4(wallet, token1, bal1);
   }
 
@@ -1669,11 +1659,8 @@ async function swapTokenToUsdgV4(wallet, tokenAddr, balance) {
   }
   if (!bestPoolKey) throw new Error(`No V4 pool found to swap ${tAddrChk} → USDG`);
 
-  const tokenContract = new ethers.Contract(tAddrChk, ERC20_ABI, wallet);
-  const allowance     = await tokenContract.allowance(wallet.address, UNIVERSAL_ROUTER_ADDRESS).catch(() => 0n);
-  if (allowance < balance) {
-    await (await tokenContract.approve(UNIVERSAL_ROUTER_ADDRESS, ethers.MaxUint256)).wait();
-  }
+  // Approve Universal Router to spend non-USDG token via Permit2
+  await ensurePermit2Allowance(wallet, tAddrChk, balance, UNIVERSAL_ROUTER_ADDRESS);
 
   const swapPlanner = new v4sdk.V4Planner();
   swapPlanner.addAction(v4sdk.Actions.SWAP_EXACT_IN_SINGLE, [{
