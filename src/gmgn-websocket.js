@@ -1,3 +1,5 @@
+const WebSocket = require('ws');
+
 const DYNAMIC_USER_AGENTS = [
   'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
   'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:126.0) Gecko/20100101 Firefox/126.0',
@@ -10,6 +12,15 @@ function getDynamicUserAgent() {
   if (process.env.USER_AGENT) return process.env.USER_AGENT;
   const idx = Math.floor(Math.random() * DYNAMIC_USER_AGENTS.length);
   return DYNAMIC_USER_AGENTS[idx];
+}
+
+function cleanErrorMessage(msg) {
+  if (!msg) return 'Unknown error';
+  const str = String(msg);
+  if (str.includes('<html') || str.includes('cf-footer') || str.includes('Cloudflare')) {
+    return 'HTTP 403 Forbidden (Cloudflare Anti-Bot Challenge)';
+  }
+  return str.length > 200 ? str.slice(0, 200) + '...' : str;
 }
 
 class GmgnWebSocketManager {
@@ -80,20 +91,23 @@ class GmgnWebSocketManager {
       });
 
       this.ws.on('close', (code, reason) => {
-        console.warn(`⚠️ [GMGN WS] Connection closed (${code}): ${reason || 'No reason'}`);
+        const cleanReason = cleanErrorMessage(reason);
+        console.warn(`⚠️ [GMGN WS] Connection closed (${code}): ${cleanReason}`);
         this.cleanup();
         this.startFallbackPolling();
         this.scheduleReconnect();
       });
 
       this.ws.on('error', (err) => {
-        console.error('❌ [GMGN WS] Error:', err.message);
+        const cleanMsg = cleanErrorMessage(err.message);
+        console.error('❌ [GMGN WS] Error:', cleanMsg);
         this.cleanup();
         this.startFallbackPolling();
         this.scheduleReconnect();
       });
     } catch (err) {
-      console.error('❌ [GMGN WS] Failed to initiate connection:', err.message);
+      const cleanMsg = cleanErrorMessage(err.message);
+      console.error('❌ [GMGN WS] Failed to initiate connection:', cleanMsg);
       this.cleanup();
       this.startFallbackPolling();
       this.scheduleReconnect();
