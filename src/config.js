@@ -7,6 +7,7 @@ require('dotenv').config({ path: path.resolve(__dirname, '..', '.env') });
 const WALLETS_PATH         = path.resolve(__dirname, '..', 'wallets.json');
 const SETTINGS_PATH        = path.resolve(__dirname, '..', 'settings.json');
 const POSITIONS_CACHE_PATH = path.resolve(__dirname, '..', 'positions_cache.json');
+const TRADE_HISTORY_PATH   = path.resolve(__dirname, '..', 'trade_history.json');
 
 function loadWallets() {
   try {
@@ -79,6 +80,48 @@ function savePositionsCache(cache) {
   }
 }
 
+function loadTradeHistory() {
+  try {
+    const raw = fs.readFileSync(TRADE_HISTORY_PATH, 'utf-8');
+    return JSON.parse(raw);
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      console.warn('⚠️ [CONFIG] Failed to load trade_history.json:', err.message);
+    }
+    return [];
+  }
+}
+
+function saveTradeHistory(history) {
+  try {
+    fs.writeFileSync(TRADE_HISTORY_PATH, JSON.stringify(history, null, 2));
+    console.log(`💾 [CONFIG] Saved ${history.length} trades to trade_history.json`);
+  } catch (err) {
+    console.error('❌ [CONFIG] Error saving trade history:', err.message);
+  }
+}
+
+function recordClosedTrade(tradeData) {
+  const history = loadTradeHistory();
+  const entry = {
+    id: tradeData.tokenId || tradeData.id || Date.now().toString(),
+    tokenId: tradeData.tokenId,
+    protocol: (tradeData.protocol || 'v4').toUpperCase(),
+    pair: tradeData.pair || `${tradeData.symbol0 || 'TOKEN'}/${tradeData.symbol1 || 'USDG'}`,
+    tokenSymbol: tradeData.tokenSymbol || tradeData.symbol0 || 'TOKEN',
+    depTotalUsd: Number(tradeData.depTotalUsd || 0),
+    closedTotalUsd: Number(tradeData.closedTotalUsd || 0),
+    pnlUsd: Number(tradeData.pnlUsd || 0),
+    pnlPercent: Number(tradeData.pnlPercent || 0),
+    closedAt: new Date().toISOString(),
+    closeTxHash: tradeData.closeTxHash || null,
+    swapTxHash: tradeData.swapTxHash || null,
+  };
+  history.unshift(entry);
+  saveTradeHistory(history);
+  return entry;
+}
+
 module.exports = {
   GMGN_API_KEY: process.env.GMGN_API_KEY,
   TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN,
@@ -91,5 +134,8 @@ module.exports = {
   saveSettings,
   loadPositionsCache,
   savePositionsCache,
+  loadTradeHistory,
+  saveTradeHistory,
+  recordClosedTrade,
 };
 

@@ -489,6 +489,76 @@ function formatTpSlAlert(data) {
   return lines.join('\n');
 }
 
+function formatPnlReport(history) {
+  if (!history || history.length === 0) {
+    return '📈 <b>LP Performance & PnL History</b>\n\nNo closed trades recorded yet. Close active LP positions to build trade history!';
+  }
+
+  let totalPnlUsd = 0;
+  let totalDepUsd = 0;
+  let totalClosedUsd = 0;
+  let winCount = 0;
+  let lossCount = 0;
+  let bestTrade = null;
+  let worstTrade = null;
+
+  history.forEach((t) => {
+    const pnl = Number(t.pnlUsd || 0);
+    const dep = Number(t.depTotalUsd || 0);
+    const closed = Number(t.closedTotalUsd || 0);
+
+    totalPnlUsd += pnl;
+    totalDepUsd += dep;
+    totalClosedUsd += closed;
+
+    if (pnl >= 0) winCount++;
+    else lossCount++;
+
+    if (!bestTrade || pnl > bestTrade.pnlUsd) bestTrade = t;
+    if (!worstTrade || pnl < worstTrade.pnlUsd) worstTrade = t;
+  });
+
+  const totalTrades = history.length;
+  const winRatePct = totalTrades > 0 ? ((winCount / totalTrades) * 100).toFixed(1) : '0.0';
+  const overallRoiPct = totalDepUsd > 0 ? ((totalPnlUsd / totalDepUsd) * 100).toFixed(1) : '0.0';
+  const pnlSign = totalPnlUsd >= 0 ? '+' : '';
+  const pnlEmoji = totalPnlUsd >= 0 ? '📈 🟢' : '📉 🔴';
+
+  const lines = [
+    `📈 <b>LP Performance & PnL History</b>\n`,
+    `💰 <b>Total Realized PnL:</b> <b>${pnlSign}$${totalPnlUsd.toFixed(2)} USD (${pnlSign}${overallRoiPct}%) ${pnlEmoji}</b>`,
+    `🏆 <b>Win Rate:</b> <b>${winRatePct}%</b> (${winCount}W / ${lossCount}L)`,
+    `🏊 <b>Total Closed Positions:</b> <b>${totalTrades}</b>`,
+    `💵 <b>Total Deposited:</b> <b>~$${totalDepUsd.toFixed(2)} USD</b>`,
+    `💸 <b>Total Returned:</b> <b>~$${totalClosedUsd.toFixed(2)} USD</b>`,
+  ];
+
+  if (bestTrade) {
+    const bSign = (bestTrade.pnlUsd || 0) >= 0 ? '+' : '';
+    lines.push(`🌟 <b>Best Trade:</b> ${bestTrade.pair} [${bestTrade.protocol}] <b>${bSign}$${(bestTrade.pnlUsd || 0).toFixed(2)} USD (${bSign}${(bestTrade.pnlPercent || 0).toFixed(1)}%)</b>`);
+  }
+  if (worstTrade && worstTrade !== bestTrade) {
+    const wSign = (worstTrade.pnlUsd || 0) >= 0 ? '+' : '';
+    lines.push(`⚠️ <b>Worst Trade:</b> ${worstTrade.pair} [${worstTrade.protocol}] <b>${wSign}$${(worstTrade.pnlUsd || 0).toFixed(2)} USD (${wSign}${(worstTrade.pnlPercent || 0).toFixed(1)}%)</b>`);
+  }
+
+  lines.push('\n📜 <b>Recent Closed Trades (Last 5):</b>');
+
+  history.slice(0, 5).forEach((t, i) => {
+    const sign = (t.pnlUsd || 0) >= 0 ? '+' : '';
+    const emoji = (t.pnlUsd || 0) >= 0 ? '📈' : '📉';
+    const closedTime = t.closedAt ? formatWibTime(Math.floor(new Date(t.closedAt).getTime() / 1000)) : '-';
+    lines.push(
+      `${i + 1}. <b>${t.pair}</b> [${t.protocol}] - #${t.tokenId || t.id}\n` +
+      `   PnL: <b>${sign}$${(t.pnlUsd || 0).toFixed(2)} USD (${sign}${(t.pnlPercent || 0).toFixed(1)}%) ${emoji}</b>\n` +
+      `   Deposit: $${(t.depTotalUsd || 0).toFixed(2)} → Return: $${(t.closedTotalUsd || 0).toFixed(2)}\n` +
+      `   Closed: ${closedTime}`
+    );
+  });
+
+  return lines.join('\n');
+}
+
 function buildTxButtons(activity, wallet) {
   if (wallet.chain !== 'robinhood' || !activity?.length) return undefined;
 
@@ -518,6 +588,7 @@ module.exports = {
   formatExecutorBalance,
   formatExecutorPositions,
   formatTpSlAlert,
+  formatPnlReport,
   buildTxButtons,
   shortAddr,
   displayName,

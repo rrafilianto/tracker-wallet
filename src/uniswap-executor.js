@@ -877,10 +877,37 @@ async function closePositionAndSwapToUsdg(tokenId) {
   const router = new ethers.Contract(UNIVERSAL_ROUTER_ADDRESS, UNIVERSAL_ROUTER_ABI, wallet);
   const swapTx = await router.execute(V4_SWAP_COMMAND, [v4SwapInput], deadline);
   const swapReceipt = await swapTx.wait();
-  return {
+
+  const res = {
     closeTxHash: burnTx.hash,
-    swapTxHash: swapReceipt.hash,
+    swapTxHash: swapReceipt ? swapReceipt.hash : null,
   };
+
+  try {
+    const posList = await getExecutorPositions().catch(() => []);
+    const posInfo = posList.find(p => String(p.tokenId) === String(tokenId));
+    const depTotalUsd = Number(posInfo?.depTotalUsd || posInfo?.totalUsd || 50);
+    const closedTotalUsd = Number(posInfo?.totalUsd || depTotalUsd);
+    const pnlUsd = closedTotalUsd - depTotalUsd;
+    const pnlPercent = depTotalUsd > 0 ? (pnlUsd / depTotalUsd) * 100 : 0;
+
+    config.recordClosedTrade({
+      tokenId,
+      protocol: 'V4',
+      pair: posInfo?.symbol1 ? `${posInfo.symbol0}/${posInfo.symbol1}` : `${sym0}/${sym1}`,
+      tokenSymbol: posInfo?.tokenSymbol || sym0 || 'TOKEN',
+      depTotalUsd,
+      closedTotalUsd,
+      pnlUsd,
+      pnlPercent,
+      closeTxHash: res.closeTxHash,
+      swapTxHash: res.swapTxHash,
+    });
+  } catch (recErr) {
+    console.error(`❌ [RECORD_TRADE_ERROR] Failed to record closed trade #${tokenId}:`, recErr.message);
+  }
+
+  return res;
 }
 
 async function ensurePermit2Allowance(wallet, tokenAddr, amountMax, spender = UNISWAP_V4_POSM_ADDRESS) {
@@ -1711,7 +1738,33 @@ async function closeV3PositionAndSwapToUsdg(tokenId) {
     if (bal1 > 0n) swapTxHash = await swapTokenToUsdgV4(wallet, token1, bal1);
   }
 
-  return { closeTxHash, swapTxHash };
+  const res = { closeTxHash, swapTxHash };
+
+  try {
+    const posList = await getExecutorPositions().catch(() => []);
+    const posInfo = posList.find(p => String(p.tokenId) === String(tokenId));
+    const depTotalUsd = Number(posInfo?.depTotalUsd || posInfo?.totalUsd || 50);
+    const closedTotalUsd = Number(posInfo?.totalUsd || depTotalUsd);
+    const pnlUsd = closedTotalUsd - depTotalUsd;
+    const pnlPercent = depTotalUsd > 0 ? (pnlUsd / depTotalUsd) * 100 : 0;
+
+    config.recordClosedTrade({
+      tokenId,
+      protocol: 'V3',
+      pair: posInfo?.symbol1 ? `${posInfo.symbol0}/${posInfo.symbol1}` : (posInfo?.pair || 'TOKEN/USDG'),
+      tokenSymbol: posInfo?.tokenSymbol || posInfo?.symbol0 || 'TOKEN',
+      depTotalUsd,
+      closedTotalUsd,
+      pnlUsd,
+      pnlPercent,
+      closeTxHash: res.closeTxHash,
+      swapTxHash: res.swapTxHash,
+    });
+  } catch (recErr) {
+    console.error(`❌ [RECORD_TRADE_ERROR] Failed to record closed V3 trade #${tokenId}:`, recErr.message);
+  }
+
+  return res;
 }
 
 // Helper: swap any ERC-20 token → USDG via V4 Universal Router

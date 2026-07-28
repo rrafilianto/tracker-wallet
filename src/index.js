@@ -195,6 +195,7 @@ async function handleCommand(msg) {
         '/stats &lt;address&gt; — Get wallet stats & balance\n' +
         '/mywallet — View executor wallet balance\n' +
         '/mypools — View & close active Uniswap liquidity pools\n' +
+        '/pnl — LP PnL history & performance analytics\n' +
         '/settings — LP deploy settings (amount & tick range)\n' +
         '/chains — Show supported chain'
       );
@@ -221,6 +222,17 @@ async function handleCommand(msg) {
       } catch (err) {
         console.error(`❌ [COMMAND /mypools] Failed to load executor positions:`, err.message);
         await send(cid, `Error loading executor positions: ${err.message}`);
+      }
+      break;
+    }
+    case '/pnl':
+    case '/report': {
+      try {
+        const history = config.loadTradeHistory();
+        await send(cid, tg.formatPnlReport(history));
+      } catch (err) {
+        console.error(`❌ [COMMAND /pnl] Failed to load PnL report:`, err.message);
+        await send(cid, `Error loading PnL report: ${err.message}`);
       }
       break;
     }
@@ -320,6 +332,7 @@ bot.setMyCommands([
   { command: 'stats', description: 'Wallet stats: /stats <addr>' },
   { command: 'mywallet', description: 'Executor wallet balance' },
   { command: 'mypools', description: 'Active Uniswap liquidity pools' },
+  { command: 'pnl', description: 'LP PnL history & performance analytics' },
   { command: 'settings', description: 'LP deploy settings (amount & ticks)' },
   { command: 'chains', description: 'Show available chains' },
   { command: 'help', description: 'Show all commands' },
