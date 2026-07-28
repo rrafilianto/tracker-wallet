@@ -1,3 +1,4 @@
+require('./logger');
 const { ethers } = require('ethers');
 const { Token, CurrencyAmount, Ether } = require('@uniswap/sdk-core');
 const v4sdk = require('@uniswap/v4-sdk');
@@ -1379,9 +1380,18 @@ async function fetchDynamicDexScreenerPools(tokenAddress) {
 // Combined: Static search + Dynamic DexScreener search (all custom fee tiers V3 & V4)
 async function findAllUsdgPoolsCombined(tokenAddress) {
   const [v4Pools, v3Pools, dynPools] = await Promise.all([
-    findAllUsdgPools(tokenAddress).catch(() => []),
-    findAllUsdgPoolsV3(tokenAddress).catch(() => []),
-    fetchDynamicDexScreenerPools(tokenAddress).catch(() => []),
+    findAllUsdgPools(tokenAddress).catch((err) => {
+      console.error(`❌ [FIND_POOLS_V4] Error searching V4 pools for ${tokenAddress}:`, err.message);
+      return [];
+    }),
+    findAllUsdgPoolsV3(tokenAddress).catch((err) => {
+      console.error(`❌ [FIND_POOLS_V3] Error searching V3 pools for ${tokenAddress}:`, err.message);
+      return [];
+    }),
+    fetchDynamicDexScreenerPools(tokenAddress).catch((err) => {
+      console.error(`❌ [FIND_POOLS_DEXSCREENER] Error fetching DexScreener pools for ${tokenAddress}:`, err.message);
+      return [];
+    }),
   ]);
 
   // Tag V4 pools with protocol info

@@ -1,3 +1,4 @@
+require('./logger');
 const WebSocket = require('ws');
 
 const DYNAMIC_USER_AGENTS = [
@@ -71,8 +72,8 @@ class GmgnWebSocketManager {
           if (this.ws && this.ws.readyState === WebSocket.OPEN) {
             try {
               this.ws.ping();
-            } catch {
-              // Ignore ping error
+            } catch (err) {
+              console.warn('⚠️ [GMGN WS] Ping heartbeat failed:', err.message);
             }
           }
         }, 25000);
@@ -129,8 +130,8 @@ class GmgnWebSocketManager {
               this.updatePrice(tokenAddr, priceUsd);
             }
           }
-        } catch {
-          // Ignore fetch error
+        } catch (err) {
+          console.error(`❌ [FALLBACK POLL ERROR] DexScreener price fetch failed for ${tokenAddr}:`, err.message);
         }
       }
     }, 5000);

@@ -1,3 +1,4 @@
+require('./logger');
 const path = require('path');
 const fs = require('fs');
 
@@ -11,13 +12,21 @@ function loadWallets() {
   try {
     const raw = fs.readFileSync(WALLETS_PATH, 'utf-8');
     return JSON.parse(raw);
-  } catch {
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      console.warn('⚠️ [CONFIG] Failed to load wallets.json:', err.message);
+    }
     return [];
   }
 }
 
 function saveWallets(wallets) {
-  fs.writeFileSync(WALLETS_PATH, JSON.stringify(wallets, null, 2));
+  try {
+    fs.writeFileSync(WALLETS_PATH, JSON.stringify(wallets, null, 2));
+    console.log(`💾 [CONFIG] Saved ${wallets.length} tracked wallets to wallets.json`);
+  } catch (err) {
+    console.error('❌ [CONFIG] Failed to save wallets.json:', err.message);
+  }
 }
 
 const DEFAULT_SETTINGS = {
@@ -32,20 +41,31 @@ function loadSettings() {
   try {
     const raw = fs.readFileSync(SETTINGS_PATH, 'utf-8');
     return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
-  } catch {
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      console.warn('⚠️ [CONFIG] Failed to load settings.json:', err.message);
+    }
     return { ...DEFAULT_SETTINGS };
   }
 }
 
 function saveSettings(settings) {
-  fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2));
+  try {
+    fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2));
+    console.log(`💾 [CONFIG] Saved settings to settings.json ($${settings.amount_usd}, -${settings.range_pct}%, TP: +${settings.tp_pct}%, SL: -${settings.sl_pct}%, AutoClose: ${settings.auto_close_enabled ? 'ON' : 'OFF'})`);
+  } catch (err) {
+    console.error('❌ [CONFIG] Failed to save settings.json:', err.message);
+  }
 }
 
 function loadPositionsCache() {
   try {
     const raw = fs.readFileSync(POSITIONS_CACHE_PATH, 'utf-8');
     return JSON.parse(raw);
-  } catch {
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      console.warn('⚠️ [CONFIG] Failed to load positions_cache.json:', err.message);
+    }
     return {};
   }
 }
@@ -53,8 +73,9 @@ function loadPositionsCache() {
 function savePositionsCache(cache) {
   try {
     fs.writeFileSync(POSITIONS_CACHE_PATH, JSON.stringify(cache, null, 2));
+    console.log(`💾 [CONFIG] Saved positions cache to positions_cache.json (${Object.keys(cache).length} cached positions)`);
   } catch (err) {
-    console.error('[CACHE] Error saving positions cache:', err.message);
+    console.error('❌ [CONFIG] Error saving positions cache:', err.message);
   }
 }
 

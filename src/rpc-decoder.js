@@ -1,3 +1,4 @@
+require('./logger');
 const { ethers } = require('ethers');
 
 const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
@@ -107,7 +108,8 @@ async function getBlockscoutTransfers(chain, txHash, walletAddress) {
     }
 
     return transfers;
-  } catch {
+  } catch (err) {
+    console.error(`❌ [RPC_DECODER] Blockscout transfer fetch error for tx ${txHash}:`, err.message);
     return [];
   }
 }
@@ -161,8 +163,8 @@ async function getEvmReceiptTransfers(chain, txHash, walletAddress) {
         }
       }
       return transfers;
-    } catch {
-      // Ignore RPC error & try next
+    } catch (err) {
+      console.warn(`⚠️ [RPC_DECODER] RPC receipt fetch failed on ${rpcUrl} for tx ${txHash}:`, err.message);
     }
   }
   return [];
@@ -184,8 +186,8 @@ async function fetchDexScreenerLiquidity(tokenAddress) {
         dex: pair.dexId,
       };
     }
-  } catch {
-    // Ignore error
+  } catch (err) {
+    console.error(`❌ [RPC_DECODER] DexScreener liquidity fetch failed for ${tokenAddress}:`, err.message);
   }
   return null;
 }

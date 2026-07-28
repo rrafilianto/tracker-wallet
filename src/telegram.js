@@ -1,3 +1,4 @@
+require('./logger');
 const RawTelegramBot = require('node-telegram-bot-api');
 const TelegramBot = typeof RawTelegramBot === 'function' ? RawTelegramBot : (RawTelegramBot.default || RawTelegramBot.TelegramBot);
 
@@ -10,9 +11,14 @@ function init(token, targetChatId) {
   return bot;
 }
 
-function sendMessage(text, opts = {}) {
+async function sendMessage(text, opts = {}) {
   if (!bot) throw new Error('Telegram bot not initialized');
-  return bot.sendMessage(chatId, text, { parse_mode: 'HTML', ...opts });
+  try {
+    return await bot.sendMessage(chatId, text, { parse_mode: 'HTML', ...opts });
+  } catch (err) {
+    console.error('❌ [TELEGRAM SEND ERROR] Failed to send message:', err.message);
+    throw err;
+  }
 }
 
 function shortAddr(addr) {

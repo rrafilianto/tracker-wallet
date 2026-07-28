@@ -1,3 +1,4 @@
+require('./logger');
 const crypto = require('crypto');
 
 const BASE_URL = 'https://openapi.gmgn.ai/v1';
@@ -18,20 +19,30 @@ function buildUrl(endpoint, params) {
 
 async function gmgnFetch(apiKey, endpoint, params = {}) {
   const url = buildUrl(endpoint, params);
-  const res = await fetch(url, {
-    headers: {
-      'X-APIKEY': apiKey,
-      'Content-Type': 'application/json',
-    },
-  });
-  if (!res.ok) {
-    throw new Error(`GMGN API ${res.status}: ${await res.text()}`);
+  try {
+    const res = await fetch(url, {
+      headers: {
+        'X-APIKEY': apiKey,
+        'Content-Type': 'application/json',
+      },
+    });
+    if (!res.ok) {
+      const errText = await res.text();
+      const err = new Error(`GMGN API ${res.status}: ${errText}`);
+      console.error(`❌ [GMGN API ERROR] Endpoint ${endpoint}:`, err.message);
+      throw err;
+    }
+    const json = await res.json();
+    if (json.code !== 0) {
+      const err = new Error(`GMGN error ${json.code}: ${json.reason || json.message || JSON.stringify(json)}`);
+      console.error(`❌ [GMGN API ERROR] Endpoint ${endpoint}:`, err.message);
+      throw err;
+    }
+    return json.data;
+  } catch (err) {
+    console.error(`❌ [GMGN FETCH ERROR] Failed request to ${endpoint}:`, err.message);
+    throw err;
   }
-  const json = await res.json();
-  if (json.code !== 0) {
-    throw new Error(`GMGN error ${json.code}: ${json.reason || json.message || JSON.stringify(json)}`);
-  }
-  return json.data;
 }
 
 function resolveChain() {

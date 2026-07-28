@@ -1,3 +1,4 @@
+require('./logger');
 const config = require('./config');
 const gmgn = require('./gmgn-api');
 const tg = require('./telegram');
@@ -153,7 +154,7 @@ async function pollWallet(w) {
       }
     }
   } catch (err) {
-    console.error(`[ERROR] ${tg.shortAddr(w.address)} ${err.message}`);
+    console.error(`❌ [POLL_ERROR] Failed polling wallet ${tg.shortAddr(w.address)} (${w.address}):`, err.message);
   }
 }
 
@@ -173,6 +174,7 @@ function startPolling() {
 async function handleCommand(msg) {
   const cid = msg.chat.id.toString();
   if (cid !== config.TELEGRAM_CHAT_ID) {
+    console.warn(`⚠️ [COMMAND_UNAUTHORIZED] Unauthorized command from Chat ID: ${cid}`);
     await bot.sendMessage(cid, 'Unauthorized');
     return;
   }
@@ -204,6 +206,7 @@ async function handleCommand(msg) {
         const balData = await uniswapExecutor.getExecutorBalance();
         await send(cid, tg.formatExecutorBalance(balData));
       } catch (err) {
+        console.error(`❌ [COMMAND /mywallet] Failed to load executor balance:`, err.message);
         await send(cid, `Error loading executor balance: ${err.message}`);
       }
       break;
@@ -216,6 +219,7 @@ async function handleCommand(msg) {
         await send(cid, formatted.text, formatted.reply_markup ? { reply_markup: formatted.reply_markup } : {});
         syncActivePositionsToWs();
       } catch (err) {
+        console.error(`❌ [COMMAND /mypools] Failed to load executor positions:`, err.message);
         await send(cid, `Error loading executor positions: ${err.message}`);
       }
       break;
@@ -242,6 +246,7 @@ async function handleCommand(msg) {
       wallets.push({ address: addr, chain: resolvedChain });
       config.saveWallets(wallets);
       lastTxMap[addr] = undefined;
+      console.log(`✅ [COMMAND /track] Started tracking wallet ${addr}`);
       await send(cid, `✅ [ROBINHOOD] Tracking <code>${tg.shortAddr(addr)}</code>`);
       await pollWallet({ address: addr, chain: resolvedChain });
       break;
@@ -252,6 +257,7 @@ async function handleCommand(msg) {
       wallets = wallets.filter((w) => w.address !== addr);
       config.saveWallets(wallets);
       delete lastTxMap[addr];
+      console.log(`❌ [COMMAND /untrack] Stopped tracking wallet ${addr}`);
       await send(cid, `❌ Stopped <code>${tg.shortAddr(addr)}</code>`);
       break;
     }
@@ -269,6 +275,7 @@ async function handleCommand(msg) {
       }
       wallet.label = label;
       config.saveWallets(wallets);
+      console.log(`🏷️ [COMMAND /tag] Tagged wallet ${addr} as "${label}"`);
       await send(cid, `🏷 Tagged <code>${tg.shortAddr(addr)}</code> as <b>${label}</b>`);
       break;
     }
@@ -296,6 +303,7 @@ async function handleCommand(msg) {
         await send(cid, tg.formatStats(stats, wallet));
         await send(cid, tg.formatHoldings(holdings));
       } catch (err) {
+        console.error(`❌ [COMMAND /stats] Failed to fetch stats for ${tg.shortAddr(addr)}:`, err.message);
         await send(cid, `Error fetching stats for ${tg.shortAddr(addr)}: ${err.message}`);
       }
       break;
@@ -527,6 +535,7 @@ async function handleAutoDeploy(msg, addr) {
       reply_markup: { inline_keyboard: poolButtons },
     });
   } catch (err) {
+    console.error(`❌ [AUTO-DEPLOY ERROR] Failed to fetch pool for token ${addr}:`, err.message);
     await bot.editMessageText(
       `❌ <b>Gagal fetch pool:</b> ${err.message}`,
       { chat_id: cid, message_id: loadingMsg.message_id, parse_mode: 'HTML' }
@@ -539,6 +548,7 @@ bot.on('callback_query', async (query) => {
   const cid = query.message?.chat.id.toString();
 
   if (cid !== config.TELEGRAM_CHAT_ID) {
+    console.warn(`⚠️ [CALLBACK_UNAUTHORIZED] Unauthorized callback query from Chat ID: ${cid}, Data: ${data}`);
     await bot.answerCallbackQuery(query.id, { text: 'Unauthorized' });
     return;
   }
@@ -607,6 +617,7 @@ bot.on('callback_query', async (query) => {
         reply_markup: { inline_keyboard: poolButtons },
       });
     } catch (e) {
+      console.error(`❌ [CALLBACK copy_add] Copy add liquidity failed:`, e.message);
       await send(cid, `❌ Copy Add Liquidity failed: ${e.message}`);
     }
   } else if (data.startsWith('close_pos_')) {
@@ -650,8 +661,10 @@ bot.on('callback_query', async (query) => {
         msg += `\n(Position was 100% USDG — no swap needed)`;
       }
 
+      console.log(`✅ [CLOSE_POS_SUCCESS] Position #${tokenId} closed. CloseTx: ${res.closeTxHash}${res.swapTxHash ? `, SwapTx: ${res.swapTxHash}` : ''}`);
       await send(cid, msg);
     } catch (e) {
+      console.error(`❌ [CALLBACK close_pos] Failed to close position #${tokenId}:`, e.message);
       await send(cid, `❌ Failed to close position #${tokenId}: ${e.message}`);
     }
   } else if (data === 'refresh_positions') {
@@ -670,6 +683,7 @@ bot.on('callback_query', async (query) => {
       if (e.message?.includes('message is not modified')) {
         await bot.answerCallbackQuery(query.id, { text: '✅ Positions data is up to date!' });
       } else {
+        console.error(`❌ [CALLBACK refresh_positions] Failed to refresh positions:`, e.message);
         await bot.answerCallbackQuery(query.id, { text: `❌ Refresh failed: ${e.message}` });
       }
     }
@@ -696,6 +710,7 @@ bot.on('callback_query', async (query) => {
       const { text, keyboard } = buildDeployConfirmation(poolInfo, shortKey, idx, deploySettings);
       await send(cid, text, { reply_markup: keyboard });
     } catch (e) {
+      console.error(`❌ [CALLBACK pool_deploy] Error preparing pool confirmation:`, e.message);
       await send(cid, `❌ Error: ${e.message}`);
     }
   } else if (data.startsWith('pool_refresh_')) {
@@ -728,6 +743,7 @@ bot.on('callback_query', async (query) => {
         reply_markup: keyboard,
       });
     } catch (e) {
+      console.error(`❌ [CALLBACK pool_refresh] Failed to refresh pool price:`, e.message);
       await send(cid, `❌ Refresh gagal: ${e.message}`);
     }
   } else if (data.startsWith('pool_confirm_')) {
@@ -785,9 +801,11 @@ bot.on('callback_query', async (query) => {
       }
       successMsg += `📌 <b>Deploy Tx:</b> https://robinhoodchain.blockscout.com/tx/${result.hash}`;
 
+      console.log(`✅ [DEPLOY_LP_SUCCESS] [${protoLabel}] Pair: ${result.tokenSymbol}/${quoteSym}, Fee: ${(result.fee / 10000).toFixed(2)}%, DeployTx: ${result.hash}`);
       await send(cid, successMsg);
       syncActivePositionsToWs();
     } catch (e) {
+      console.error(`❌ [CALLBACK pool_confirm] LP deployment failed:`, e.message);
       await send(cid, `❌ Deploy gagal: ${e.message}`);
     }
   } else if (data.startsWith('settings_amount_')) {
