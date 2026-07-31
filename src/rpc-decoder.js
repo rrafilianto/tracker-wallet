@@ -3,7 +3,20 @@ const { ethers } = require('ethers');
 
 const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 
-function getChainRpcs() {
+function getChainRpcs(chain = 'robinhood') {
+  if (chain === 'bsc') {
+    const list = [];
+    if (process.env.BSC_RPC_URL) list.push(process.env.BSC_RPC_URL);
+    list.push(
+      'https://bsc-dataseed.binance.org/',
+      'https://bsc-dataseed1.defibit.io/',
+      'https://bsc-dataseed2.defibit.io/',
+      'https://bsc-dataseed1.ninicoin.io/'
+    );
+    return list;
+  }
+
+  // Robinhood chain RPCs
   const alchemyKey = process.env.ALCHEMY_API_KEY;
   const alchemyUrl = process.env.ALCHEMY_RPC_URL;
   const list = [];
@@ -20,15 +33,19 @@ const BLOCKSCOUT_API = 'https://robinhoodchain.blockscout.com/api/v2/transaction
 
 const tokenMetadataCache = new Map([
   ['0x5fc5360d0400a0fd4f2af552add042d716f1d168', { symbol: 'USDG', decimals: 6 }],
+  ['0x55d398326f99059ff775485246999027b3197955', { symbol: 'USDT', decimals: 18 }],
+  ['0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c', { symbol: 'WBNB', decimals: 18 }],
+  ['0xe9e7cea3dedca5984780bafc599bd69add087d56', { symbol: 'BUSD', decimals: 18 }],
+  ['0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d', { symbol: 'USDC', decimals: 18 }],
   ['0x0000000000000000000000000000000000000000', { symbol: 'ETH', decimals: 18 }],
 ]);
 
-async function getTokenMetadata(tokenAddress) {
+async function getTokenMetadata(tokenAddress, chain = 'robinhood') {
   if (!tokenAddress) return { symbol: 'UNKNOWN', decimals: 18 };
   const addrLower = tokenAddress.toLowerCase();
   if (tokenMetadataCache.has(addrLower)) return tokenMetadataCache.get(addrLower);
 
-  const rpcs = getChainRpcs();
+  const rpcs = getChainRpcs(chain);
   for (const rpcUrl of rpcs) {
     try {
       const provider = new ethers.JsonRpcProvider(rpcUrl);
@@ -70,6 +87,7 @@ function cleanAddress(topic) {
 }
 
 async function getBlockscoutTransfers(chain, txHash, walletAddress) {
+  if (chain !== 'robinhood') return [];
   try {
     const res = await fetch(`${BLOCKSCOUT_API}/${txHash}/token-transfers`);
     const data = await res.json();
@@ -114,11 +132,11 @@ async function getBlockscoutTransfers(chain, txHash, walletAddress) {
   }
 }
 
-async function getEvmReceiptTransfers(chain, txHash, walletAddress) {
+async function getEvmReceiptTransfers(chain = 'robinhood', txHash, walletAddress) {
   const bsTransfers = await getBlockscoutTransfers(chain, txHash, walletAddress);
   if (bsTransfers.length > 0) return bsTransfers;
 
-  const rpcs = getChainRpcs();
+  const rpcs = getChainRpcs(chain);
   const paddedWallet = padAddress(walletAddress);
 
   for (const rpcUrl of rpcs) {
@@ -146,7 +164,7 @@ async function getEvmReceiptTransfers(chain, txHash, walletAddress) {
             const rawValHex = log.data === '0x' || !log.data ? '0x0' : log.data;
             const rawValue = BigInt(rawValHex).toString();
             const tokenAddr = log.address.toLowerCase();
-            const meta = await getTokenMetadata(tokenAddr);
+            const meta = await getTokenMetadata(tokenAddr, chain);
             const amount = Number(BigInt(rawValue)) / Math.pow(10, meta.decimals);
 
             transfers.push({

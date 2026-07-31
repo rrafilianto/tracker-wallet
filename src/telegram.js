@@ -26,7 +26,11 @@ function shortAddr(addr) {
 }
 
 function chainLabel(chain) {
-  return (chain || 'sol').toUpperCase();
+  if (!chain) return 'ETH';
+  const c = chain.toLowerCase();
+  if (c === 'bsc') return '🟡 BSC';
+  if (c === 'robinhood' || c === 'rh') return '🔴 RH';
+  return c.toUpperCase();
 }
 
 function displayName(wallet) {
@@ -69,9 +73,10 @@ function formatWibTimeShort(dateObj = new Date()) {
   return `${p.hour}:${p.minute}:${p.second} WIB`;
 }
 
-function formatTx(activity, wallet) {
+function formatTx(activity, wallet, currentChain) {
   const name = wallet.label || shortAddr(wallet.address);
-  const lines = [`🔔 <b>[${chainLabel(wallet.chain)}] ${name}</b>`];
+  const activeChain = currentChain || wallet.chain || 'robinhood';
+  const lines = [`🔔 <b>[${chainLabel(activeChain)}] ${name}</b>`];
 
   if (!activity?.length) {
     lines.push('No recent transactions.');
@@ -559,8 +564,9 @@ function formatPnlReport(history) {
   return lines.join('\n');
 }
 
-function buildTxButtons(activity, wallet) {
-  if (wallet.chain !== 'robinhood' || !activity?.length) return undefined;
+function buildTxButtons(activity, wallet, chain) {
+  const currentChain = chain || wallet?.chain || 'robinhood';
+  if (currentChain !== 'robinhood' || !activity?.length) return undefined;
 
   const keyboard = [];
   activity.slice(0, 3).forEach((tx) => {

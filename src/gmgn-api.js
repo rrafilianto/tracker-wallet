@@ -45,29 +45,25 @@ async function gmgnFetch(apiKey, endpoint, params = {}) {
   }
 }
 
-function resolveChain() {
-  return 'robinhood';
-}
-
-function getWalletActivity(apiKey, address, limit = 10) {
+function getWalletActivity(apiKey, address, limit = 10, chain = 'robinhood') {
   return gmgnFetch(apiKey, '/user/wallet_activity', {
-    chain: 'robinhood',
+    chain: chain || 'robinhood',
     wallet_address: address,
     limit,
   });
 }
 
-function getWalletStats(apiKey, address, period = '7d') {
+function getWalletStats(apiKey, address, period = '7d', chain = 'robinhood') {
   return gmgnFetch(apiKey, '/user/wallet_stats', {
-    chain: 'robinhood',
+    chain: chain || 'robinhood',
     wallet_address: address,
     period,
   });
 }
 
-function getWalletHoldings(apiKey, address) {
+function getWalletHoldings(apiKey, address, chain = 'robinhood') {
   return gmgnFetch(apiKey, '/user/wallet_holdings', {
-    chain: 'robinhood',
+    chain: chain || 'robinhood',
     wallet_address: address,
     limit: 20,
     order_by: 'usd_value',
@@ -80,5 +76,6 @@ module.exports = {
   getWalletStats,
   getWalletHoldings,
   detectChain,
-  VALID_CHAINS: ['robinhood'],
+  VALID_CHAINS: ['robinhood', 'bsc'],
 };
+

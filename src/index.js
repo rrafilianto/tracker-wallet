@@ -89,7 +89,9 @@ function send(chatId, text, opts = {}) {
 }
 
 function findWallet(addr) {
-  return wallets.find((w) => w.address === addr);
+  if (!addr) return null;
+  const target = addr.toLowerCase();
+  return wallets.find((w) => w.address.toLowerCase() === target);
 }
 
 async function enrichLiquidityEvents(list, wallet) {
@@ -100,7 +102,7 @@ async function enrichLiquidityEvents(list, wallet) {
         const liqDetails = await uniswapExecutor.getLiquidityTxDetails(tx.tx_hash, wallet.address);
         if (liqDetails) tx.liqDetails = liqDetails;
 
-        const transfers = await rpcDecoder.getLiquidityTransfers(wallet.chain, tx.tx_hash, wallet.address);
+        const transfers = await rpcDecoder.getLiquidityTransfers(wallet.chain || 'robinhood', tx.tx_hash, wallet.address);
         if (transfers && transfers.length > 0) {
           tx.decodedTransfers = transfers;
           if (transfers.range) tx.decodedRange = transfers.range;
@@ -115,19 +117,22 @@ async function enrichLiquidityEvents(list, wallet) {
   }
 }
 
-async function pollWallet(w) {
+async function pollWalletChain(w, chain) {
   try {
-    const activity = await gmgn.getWalletActivity(config.GMGN_API_KEY, w.address, 5, w.chain);
+    const activity = await gmgn.getWalletActivity(config.GMGN_API_KEY, w.address, 5, chain);
     if (!activity?.activities?.length && !activity?.length) return;
 
     const list = activity.activities || activity;
     const latestTxHash = list[0].tx_hash;
     if (!latestTxHash) return;
 
-    await enrichLiquidityEvents(list, w);
+    if (chain === 'robinhood') {
+      await enrichLiquidityEvents(list, w);
+    }
 
-    const prev = lastTxMap[w.address];
-    const buttons = tg.buildTxButtons(list, w);
+    const stateKey = `${w.address.toLowerCase()}_${chain}`;
+    const prev = lastTxMap[stateKey];
+    const buttons = tg.buildTxButtons(list, w, chain);
 
     // Cache tx data for copy trade callbacks
     list.forEach((tx) => {
@@ -137,8 +142,8 @@ async function pollWallet(w) {
     });
 
     if (prev === undefined) {
-      lastTxMap[w.address] = latestTxHash;
-      await tg.sendMessage(tg.formatTx(list, w), buttons ? { reply_markup: buttons } : {});
+      lastTxMap[stateKey] = latestTxHash;
+      await tg.sendMessage(tg.formatTx(list, w, chain), buttons ? { reply_markup: buttons } : {});
       return;
     }
 
@@ -148,13 +153,20 @@ async function pollWallet(w) {
         if (tx.tx_hash === prev) break;
         newTxs.push(tx);
       }
-      lastTxMap[w.address] = latestTxHash;
+      lastTxMap[stateKey] = latestTxHash;
       if (newTxs.length > 0) {
-        await tg.sendMessage(tg.formatTx(newTxs.reverse(), w), buttons ? { reply_markup: buttons } : {});
+        await tg.sendMessage(tg.formatTx(newTxs.reverse(), w, chain), buttons ? { reply_markup: buttons } : {});
       }
     }
   } catch (err) {
-    console.error(`❌ [POLL_ERROR] Failed polling wallet ${tg.shortAddr(w.address)} (${w.address}):`, err.message);
+    console.error(`❌ [POLL_ERROR] Failed polling wallet ${tg.shortAddr(w.address)} [${chain}]:`, err.message);
+  }
+}
+
+async function pollWallet(w) {
+  const chains = w.chains && w.chains.length > 0 ? w.chains : [w.chain || 'robinhood'];
+  for (const chain of chains) {
+    await pollWalletChain(w, chain);
   }
 }
 
@@ -187,17 +199,17 @@ async function handleCommand(msg) {
     case '/start':
     case '/help': {
       await send(cid,
-        '<b>Robinhood Wallet Tracker Bot</b>\n\n' +
-        '/track &lt;address&gt; — Track wallet on Robinhood Chain\n' +
+        '<b>Robinhood & BSC Wallet Tracker Bot</b>\n\n' +
+        '/track &lt;address&gt; [rh|bsc|all] — Track wallet on Robinhood & BSC\n' +
         '/untrack &lt;address&gt; — Stop tracking wallet\n' +
         '/tag &lt;address&gt; &lt;label&gt; — Set wallet nickname\n' +
-        '/list — List tracked wallets\n' +
-        '/stats &lt;address&gt; — Get wallet stats & balance\n' +
+        '/list — List tracked wallets & active chains\n' +
+        '/stats &lt;address&gt; [rh|bsc] — Get wallet stats & balance\n' +
         '/mywallet — View executor wallet balance\n' +
         '/mypools — View & close active Uniswap liquidity pools\n' +
         '/pnl — LP PnL history & performance analytics\n' +
         '/settings — LP deploy settings (amount & tick range)\n' +
-        '/chains — Show supported chain'
+        '/chains — Show supported chains'
       );
       break;
     }
@@ -241,36 +253,66 @@ async function handleCommand(msg) {
       break;
     }
     case '/chains': {
-      await send(cid, '<b>Supported Chain</b>\n• <code>robinhood</code> (Robinhood Chain)\n\nUsage: /track &lt;wallet_address&gt;');
+      await send(cid,
+        '<b>Supported Chains</b>\n' +
+        '• <code>robinhood</code> (Robinhood Chain)\n' +
+        '• <code>bsc</code> (BNB Smart Chain)\n\n' +
+        '<b>Penggunaan /track:</b>\n' +
+        '• <code>/track &lt;address&gt; bsc</code> — Track di BSC saja\n' +
+        '• <code>/track &lt;address&gt; rh</code> — Track di Robinhood saja\n' +
+        '• <code>/track &lt;address&gt; all</code> (atau tanpa chain) — Track di Robinhood & BSC bersamaan'
+      );
       break;
     }
     case '/track': {
       const addr = parts[1];
+      const chainArg = (parts[2] || 'all').toLowerCase();
       if (!addr || addr.length < 10) {
-        await send(cid, 'Usage: /track &lt;wallet_address&gt;');
+        await send(cid, 'Usage: /track &lt;wallet_address&gt; [rh|bsc|all]');
         return;
       }
-      if (findWallet(addr)) {
-        await send(cid, 'Already tracking this wallet.');
-        return;
+
+      let targetChains = ['robinhood', 'bsc'];
+      if (chainArg === 'bsc') targetChains = ['bsc'];
+      else if (chainArg === 'rh' || chainArg === 'robinhood') targetChains = ['robinhood'];
+      else if (chainArg === 'all' || chainArg === 'both') targetChains = ['robinhood', 'bsc'];
+
+      const addrLower = addr.toLowerCase();
+      let wallet = findWallet(addrLower);
+
+      if (wallet) {
+        const existingChains = wallet.chains || [wallet.chain || 'robinhood'];
+        const combinedChains = Array.from(new Set([...existingChains, ...targetChains]));
+        wallet.chains = combinedChains;
+        wallet.chain = combinedChains[0];
+        config.saveWallets(wallets);
+        const badges = combinedChains.map((c) => tg.chainLabel(c)).join(', ');
+        await send(cid, `✅ Updated tracking for <code>${tg.shortAddr(addrLower)}</code>: [${badges}]`);
+      } else {
+        wallet = { address: addrLower, chain: targetChains[0], chains: targetChains };
+        wallets.push(wallet);
+        config.saveWallets(wallets);
+        targetChains.forEach((c) => {
+          lastTxMap[`${addrLower}_${c}`] = undefined;
+        });
+        console.log(`✅ [COMMAND /track] Started tracking wallet ${addrLower} on chains: ${targetChains.join(', ')}`);
+        const badges = targetChains.map((c) => tg.chainLabel(c)).join(', ');
+        await send(cid, `✅ Started tracking <code>${tg.shortAddr(addrLower)}</code>: [${badges}]`);
+        await pollWallet(wallet);
       }
-      const resolvedChain = 'robinhood';
-      wallets.push({ address: addr, chain: resolvedChain });
-      config.saveWallets(wallets);
-      lastTxMap[addr] = undefined;
-      console.log(`✅ [COMMAND /track] Started tracking wallet ${addr}`);
-      await send(cid, `✅ [ROBINHOOD] Tracking <code>${tg.shortAddr(addr)}</code>`);
-      await pollWallet({ address: addr, chain: resolvedChain });
       break;
     }
     case '/untrack': {
       const addr = parts[1];
       if (!addr) { await send(cid, 'Usage: /untrack &lt;address&gt;'); return; }
-      wallets = wallets.filter((w) => w.address !== addr);
+      const addrLower = addr.toLowerCase();
+      wallets = wallets.filter((w) => w.address.toLowerCase() !== addrLower);
       config.saveWallets(wallets);
-      delete lastTxMap[addr];
-      console.log(`❌ [COMMAND /untrack] Stopped tracking wallet ${addr}`);
-      await send(cid, `❌ Stopped <code>${tg.shortAddr(addr)}</code>`);
+      Object.keys(lastTxMap).forEach((k) => {
+        if (k.startsWith(addrLower)) delete lastTxMap[k];
+      });
+      console.log(`❌ [COMMAND /untrack] Stopped tracking wallet ${addrLower}`);
+      await send(cid, `❌ Stopped tracking <code>${tg.shortAddr(addrLower)}</code>`);
       break;
     }
     case '/tag': {
@@ -287,36 +329,43 @@ async function handleCommand(msg) {
       }
       wallet.label = label;
       config.saveWallets(wallets);
-      console.log(`🏷️ [COMMAND /tag] Tagged wallet ${addr} as "${label}"`);
-      await send(cid, `🏷 Tagged <code>${tg.shortAddr(addr)}</code> as <b>${label}</b>`);
+      console.log(`🏷️ [COMMAND /tag] Tagged wallet ${wallet.address} as "${label}"`);
+      await send(cid, `🏷 Tagged <code>${tg.shortAddr(wallet.address)}</code> as <b>${label}</b>`);
       break;
     }
     case '/list': {
       if (wallets.length === 0) {
-        await send(cid, 'No wallets currently tracked. Use /track &lt;address&gt;');
+        await send(cid, 'No wallets currently tracked. Use /track &lt;address&gt; [rh|bsc|all]');
         return;
       }
-      const lines = wallets.map(
-        (w) => `• <code>${tg.shortAddr(w.address)}</code> ${w.label ? `(<b>${w.label}</b>)` : ''} [ROBINHOOD]`
-      );
+      const lines = wallets.map((w) => {
+        const activeChains = (w.chains || [w.chain || 'robinhood']).map((c) => tg.chainLabel(c)).join(', ');
+        return `• <code>${tg.shortAddr(w.address)}</code> ${w.label ? `(<b>${w.label}</b>)` : ''} [${activeChains}]`;
+      });
       await send(cid, `<b>Tracked Wallets (${wallets.length})</b>\n${lines.join('\n')}`);
       break;
     }
     case '/stats': {
       const addr = parts[1];
+      const chainArg = (parts[2] || '').toLowerCase();
       if (!addr) {
-        await send(cid, 'Usage: /stats &lt;wallet_address&gt;');
+        await send(cid, 'Usage: /stats &lt;wallet_address&gt; [rh|bsc]');
         return;
       }
-      const wallet = findWallet(addr) || { address: addr, chain: 'robinhood' };
+      const wallet = findWallet(addr) || { address: addr.toLowerCase(), chain: 'robinhood', chains: ['robinhood', 'bsc'] };
+      let targetChain = wallet.chain || 'robinhood';
+      if (chainArg === 'bsc') targetChain = 'bsc';
+      else if (chainArg === 'rh' || chainArg === 'robinhood') targetChain = 'robinhood';
+
       try {
-        const stats = await gmgn.getWalletStats(config.GMGN_API_KEY, wallet.address, '7d');
-        const holdings = await gmgn.getWalletHoldings(config.GMGN_API_KEY, wallet.address);
+        const stats = await gmgn.getWalletStats(config.GMGN_API_KEY, wallet.address, '7d', targetChain);
+        const holdings = await gmgn.getWalletHoldings(config.GMGN_API_KEY, wallet.address, targetChain);
+        await send(cid, `📊 <b>Stats [${tg.chainLabel(targetChain)}] — ${tg.displayName(wallet)}</b>`);
         await send(cid, tg.formatStats(stats, wallet));
         await send(cid, tg.formatHoldings(holdings));
       } catch (err) {
-        console.error(`❌ [COMMAND /stats] Failed to fetch stats for ${tg.shortAddr(addr)}:`, err.message);
-        await send(cid, `Error fetching stats for ${tg.shortAddr(addr)}: ${err.message}`);
+        console.error(`❌ [COMMAND /stats] Failed to fetch stats for ${tg.shortAddr(addr)} [${targetChain}]:`, err.message);
+        await send(cid, `Error fetching stats for ${tg.shortAddr(addr)} [${targetChain}]: ${err.message}`);
       }
       break;
     }

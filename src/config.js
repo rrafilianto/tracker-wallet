@@ -12,7 +12,23 @@ const TRADE_HISTORY_PATH   = path.resolve(__dirname, '..', 'trade_history.json')
 function loadWallets() {
   try {
     const raw = fs.readFileSync(WALLETS_PATH, 'utf-8');
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((w) => {
+      let chains = w.chains;
+      if (!chains) {
+        if (w.chain) {
+          chains = w.chain === 'all' || w.chain === 'both' ? ['robinhood', 'bsc'] : [w.chain];
+        } else {
+          chains = ['robinhood', 'bsc'];
+        }
+      }
+      return {
+        ...w,
+        chain: chains[0] || 'robinhood',
+        chains,
+      };
+    });
   } catch (err) {
     if (err.code !== 'ENOENT') {
       console.warn('⚠️ [CONFIG] Failed to load wallets.json:', err.message);
