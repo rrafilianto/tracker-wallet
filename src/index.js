@@ -360,8 +360,7 @@ async function handleCommand(msg) {
       try {
         const stats = await gmgn.getWalletStats(config.GMGN_API_KEY, wallet.address, '7d', targetChain);
         const holdings = await gmgn.getWalletHoldings(config.GMGN_API_KEY, wallet.address, targetChain);
-        await send(cid, `📊 <b>Stats [${tg.chainLabel(targetChain)}] — ${tg.displayName(wallet)}</b>`);
-        await send(cid, tg.formatStats(stats, wallet));
+        await send(cid, tg.formatStats(stats, wallet, targetChain));
         await send(cid, tg.formatHoldings(holdings));
       } catch (err) {
         console.error(`❌ [COMMAND /stats] Failed to fetch stats for ${tg.shortAddr(addr)} [${targetChain}]:`, err.message);

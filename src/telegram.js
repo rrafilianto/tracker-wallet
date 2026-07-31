@@ -236,12 +236,15 @@ function formatTx(activity, wallet, currentChain) {
   return lines.join('\n');
 }
 
-function formatStats(stats, address, chain) {
+function formatStats(stats, wallet, currentChain) {
   if (!stats) return 'No stats available.';
-  const lines = [`📊 <b>[${chainLabel(chain)}] ${shortAddr(address)}</b>`];
+  const addrStr = typeof wallet === 'object' ? wallet.address : wallet;
+  const name = typeof wallet === 'object' ? (wallet.label || shortAddr(addrStr)) : shortAddr(addrStr);
+  const activeChain = currentChain || (typeof wallet === 'object' ? wallet.chain : null) || 'robinhood';
+  const lines = [`📊 <b>[${chainLabel(activeChain)}] ${name}</b>`];
   if (stats.native_balance !== undefined) {
     const bal = Number(stats.native_balance);
-    const symbol = chain === 'sol' ? 'SOL' : 'ETH';
+    const symbol = activeChain === 'bsc' ? 'BNB' : 'ETH';
     lines.push(`Balance: <b>${bal.toFixed(4)} ${symbol}</b>`);
   }
   if (stats.realized_profit !== undefined)
@@ -598,5 +601,6 @@ module.exports = {
   buildTxButtons,
   shortAddr,
   displayName,
+  chainLabel,
   formatWibTimeShort,
 };
