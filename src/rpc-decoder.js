@@ -90,6 +90,7 @@ async function getBlockscoutTransfers(chain, txHash, walletAddress) {
   if (chain !== 'robinhood') return [];
   try {
     const res = await fetch(`${BLOCKSCOUT_API}/${txHash}/token-transfers`);
+    if (!res.ok) return [];
     const data = await res.json();
     if (!data.items) return [];
 
@@ -127,7 +128,7 @@ async function getBlockscoutTransfers(chain, txHash, walletAddress) {
 
     return transfers;
   } catch (err) {
-    console.error(`❌ [RPC_DECODER] Blockscout transfer fetch error for tx ${txHash}:`, err.message);
+    console.warn(`⚠️ [RPC_DECODER] Blockscout transfer fetch fallback for tx ${txHash.slice(0, 10)}:`, err.message);
     return [];
   }
 }
